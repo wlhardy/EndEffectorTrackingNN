@@ -1,0 +1,7 @@
+/.venv
+/__pycache__
+/figs
+/image_subset
+/tmp
+/training
+/wandb
