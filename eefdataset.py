@@ -22,8 +22,10 @@ def quantize_joint(joint_value, precision, symmetric=False):
     class_idx = int(round((angle) / precision))
     return class_idx
 
-def class_to_angle(class_idx, precision):
+def class_to_angle(class_idx, precision, symmetric=False):
     # Convert class index back to angle (-180 to 180 range)
+    if symmetric:
+        return class_idx * precision
     return class_idx * precision - 180
 
 class RandomHorizontalFlipWithTarget:

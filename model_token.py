@@ -37,20 +37,20 @@ def load_image_as_tensor(image_path, rotate=False):
 
 # MLP Head Module
 class EndEffectorPosePredToken(nn.Module):
-    def __init__(self, backbone, num_classes):
+    def __init__(self, backbone, num_classes, nbr_tokens=1):
         super().__init__()
         self.backbone = backbone
         self.patch_size = backbone.patch_size
         embed_dim = backbone.embed_dim  # usually 1024 or 768
-        self.token_functions_name = TOKEN_LIST
-        self.nbr_tokens = len(self.token_functions_name)
+        self.nbr_tokens = nbr_tokens
         
         self.learnable_tokens = nn.Parameter(torch.randn(1, self.nbr_tokens, embed_dim))
 
         self.pos_embed = nn.Parameter(
-            torch.zeros(1, backbone.patch_embed.num_patches + self.nbr_tokens, embed_dim)
+            torch.zeros(1, self.nbr_tokens, embed_dim)
         )
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.normal_(self.learnable_tokens, std=1e-6)
 
         self.j3_head = nn.Linear(embed_dim, num_classes // 2)
 
@@ -82,7 +82,7 @@ class EndEffectorPosePredToken(nn.Module):
     def interpolate_pos_encoding(self, x, w, h):
         previous_dtype = x.dtype
         npatch = x.shape[1] - self.nbr_tokens
-        N = self.pos_embed.shape[1] - self.nbr_tokens
+        N = self.backbone.pos_embed.shape[1] - 1
         if npatch == N and w == h:
             return self.pos_embed
         pos_embed = self.pos_embed.float()
@@ -123,9 +123,10 @@ class EndEffectorPosePredToken(nn.Module):
             x = blk(x)
         x = self.norm(x)
         task_token_out = x[:, :self.nbr_tokens]
+        j3_task_token_out = task_token_out.mean(dim=1)
         #j1_logits = self.j1_head(task_token_out[:, 0])
         #j2_logits = self.j2_head(task_token_out[:, 1])
-        j3_logits = self.j3_head(task_token_out[:, 0])
+        j3_logits = self.j3_head(j3_task_token_out)
         #j4_logits = self.j4_head(task_token_out[:, 3])
         #base_x = self.base_x_head(task_token_out[:, 4])
         #base_y = self.base_y_head(task_token_out[:, 5])

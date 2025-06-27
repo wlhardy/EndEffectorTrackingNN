@@ -19,23 +19,23 @@ from torch.utils.data import DataLoader, SubsetRandomSampler
 
 # Configuration
 TRAIN_IMAGE_FOLDER_PATH = "/home/wilah/workspace/EndEffectorTrackingNN/image_subset"
+#TRAIN_IMAGE_FOLDER_PATH = "/home/wilah/workspace/EndEffectorTrackingNN/single_image"
 TRAIN_JOINT_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202504/joint_values.csv"
 TRAIN_XY_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202504/center_piece_pixel_coordinates.csv"  # Path to the ground truth file for XY coordinates
 VAL_IMAGE_FOLDER_PATH = "/home/wilah/workspace/SVO_processing/output/20250605-for_william./rgb/left"
 VAL_JOINT_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202506/joint_values.csv"
 VAL_XY_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202506/center_piece_pixel_coordinates.csv"  # Path to the ground truth file for XY coordinates
 GT_PRECISION = 1 # Degrees that the GT will be rounded to (e.g. if set to 5, then a GT of 12 will be set to 10)
-EPOCHS = 25
-LEARNING_RATE = [1e-2, 1e-3, 1e-4, 1e-5]
+EPOCHS = 30
+LEARNING_RATE = [1e-4, 1e-5, 1e-6]
 BACKBONE = 'dinov2_vitb14_reg'
-MLP_DIM = 256
 NUM_CLASSES = math.ceil(360 / GT_PRECISION)
-BATCH_SIZE = [1, 2, 4]
+MAX_BATCH_SIZE = 4
 RANDOM_SEED = 42
-LABEL_SMOOTHING_MAX = 0.5
-LABEL_SMOOTHING_MIN = 0
-LR_DECAY_POWER = 0.95
-REDUCE_LABEL_SMOOTHING_MIN = 0.1
+LABEL_SMOOTHING_MAX = 0.05
+LABEL_SMOOTHING_MIN = 0.0
+LR_DECAY_POWER = [0.9, 0.95, 0.99, 1.0]
+REDUCE_LABEL_SMOOTHING_MIN = 0.0
 REDUCE_LABEL_SMOOTHING_MAX = 0.25
 SAMPLES_PER_CLASS = 3
 LEFT_CROPPING = 398
@@ -43,18 +43,23 @@ RIGHT_CROPPING = 856
 DEBUG = 0
 WEIGHT_LOSS_JOINTS = 1.0
 WEIGHT_LOSS_XY = 0.01
+FREEZE_BLOCKS = [0, 2, 4, 6, 8, 10]  # Max number of blocks in the backbone is 11
+NBR_TOKEN_PER_TASK = [1, 2, 4]
+TARGET_BATCH_SIZE = [1, 2, 4]#, 8, 16]
+FREEZE_POS_EMBED = True
+FREEZE_PATCH_EMBED = True
+RUN_VALIDATION = True
 
 sweep_config = {
     "method": "random",
     "metric": {"goal": "minimize", "name": "loss"},
     "parameters": {
         "model_type": {"value": "token"},
-        "batch_size": {"values": BATCH_SIZE},
+        "max_batch_size": {"value": MAX_BATCH_SIZE},
         "ground_truth_precision": {"value": GT_PRECISION},
         "epochs": {"value": EPOCHS},
         "random_seed": {"value": RANDOM_SEED},
         "backbone": {"value": BACKBONE},
-        "mlp_dim": {"value": MLP_DIM},
         "num_classes": {"value": NUM_CLASSES},
         "train_image_folder_path": {"value": TRAIN_IMAGE_FOLDER_PATH},
         "train_joint_ground_truth_file_path": {"value": TRAIN_JOINT_GT_FILE_PATH},
@@ -64,7 +69,7 @@ sweep_config = {
         "val_xy_ground_truth_file_path": {"value": VAL_XY_GT_FILE_PATH},
         "learning_rate": {"values": LEARNING_RATE},
         "label_smoothing": {"distribution": "uniform", "max": LABEL_SMOOTHING_MAX, "min": LABEL_SMOOTHING_MIN},
-        "lr_decay_power": {"value": LR_DECAY_POWER},
+        "lr_decay_power": {"values": LR_DECAY_POWER},
         "reduce_label_smoothing": {"distribution": "uniform", "max": REDUCE_LABEL_SMOOTHING_MAX, "min": REDUCE_LABEL_SMOOTHING_MIN},
         "samples_per_class": {"value": SAMPLES_PER_CLASS},
         "left_cropping": {"value": LEFT_CROPPING},
@@ -73,6 +78,11 @@ sweep_config = {
         "bottom_cropping": {"value": 2},
         "weight_loss_joints": {"value": WEIGHT_LOSS_JOINTS},
         "weight_loss_xy": {"value": WEIGHT_LOSS_XY},
+        "target_batch_size": {"values": TARGET_BATCH_SIZE},
+        "freeze_blocks": {"values": FREEZE_BLOCKS},
+        "nbr_token_per_task": {"values": NBR_TOKEN_PER_TASK},
+        "freeze_pos_embed": {"value": FREEZE_POS_EMBED},
+        "freeze_patch_embed": {"value": FREEZE_PATCH_EMBED},
     },
 }
 
@@ -113,12 +123,26 @@ def train(config=None):
         for param in backbone_model.parameters():
             param.requires_grad = True
 
+        num_blocks_to_freeze = config.freeze_blocks
+        for i, block in enumerate(backbone_model.blocks):
+            if i < num_blocks_to_freeze:
+                for param in block.parameters():
+                    param.requires_grad = False
+        
+        if config.freeze_pos_embed:
+            print("Freezing position embedding.")
+            backbone_model.pos_embed.requires_grad = False
+
+        if config.freeze_patch_embed:
+            print("Freezing patch embedding.")
+            backbone_model.patch_embed.requires_grad = False
+
         # Load model
-        ee_model = model_token.EndEffectorPosePredToken(backbone_model, num_classes=config.num_classes).to(device)
+        ee_model = model_token.EndEffectorPosePredToken(backbone_model, num_classes=config.num_classes, nbr_tokens=config.nbr_token_per_task).to(device)
         optimizer = torch.optim.AdamW(ee_model.parameters(), lr=config.learning_rate)
         
         scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer,
-                                                          total_iters=config.epochs, 
+                                                          total_iters=config.epochs,
                                                           power=config.lr_decay_power)
 
         criterion_joints = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
@@ -133,6 +157,9 @@ def train(config=None):
         checkpoint_dir = os.path.join("training", f"checkpoint_{timestamp}")
         os.makedirs(checkpoint_dir, exist_ok=True)
         current_label_smoothing = config.label_smoothing
+        target_batch_size = config.target_batch_size
+        batch_size = min(config.max_batch_size, target_batch_size)
+        accumulation_steps = max(1, target_batch_size // batch_size)
 
         for epoch in range(config.epochs):
             # Get indices
@@ -142,8 +169,7 @@ def train(config=None):
             sampler = SubsetRandomSampler(indices)
 
             # Create DataLoader
-            dataloader_train = DataLoader(dataset_train, batch_size=config.batch_size, sampler=sampler)
-            dataloader_val = DataLoader(dataset_val, batch_size=config.batch_size, shuffle=False)
+            dataloader_train = DataLoader(dataset_train, batch_size=batch_size, sampler=sampler)
 
             ee_model.train()
             running_loss = 0
@@ -203,7 +229,9 @@ def train(config=None):
                         else:
                             print(f"Parameter: {name}, no gradient computed or parameter unused.")
 
-                optimizer.step()
+                if (i + 1) % accumulation_steps == 0 or (i + 1 == len(dataloader_train)):
+                    optimizer.step()
+                    optimizer.zero_grad()
 
                 img_total += images.size(0)
 
@@ -211,10 +239,18 @@ def train(config=None):
                 j3_preds = j3_logits.argmax(dim=1)
 
                 # Convert to angles
-                j3_pred_angles = eefdataset.class_to_angle(j3_preds, config.ground_truth_precision)
+                j3_pred_angles = eefdataset.class_to_angle(j3_preds, config.ground_truth_precision, symmetric=True)
+                j3_gt_angles = eefdataset.class_to_angle(target_base, GT_PRECISION, symmetric=True)
+                if DEBUG > 0:
+                    print(f"j3_pred_angles: {j3_pred_angles}")
+                    print(f"target_base: {target_base}")
+                    print(f"j3_gt_angles: {j3_gt_angles}")
 
                 # Compute angular error
-                angular_error_j3 = torch.abs(j3_pred_angles - joint_values['base_joint'].to(device))
+                angular_error_j3 = torch.abs(j3_pred_angles - j3_gt_angles)
+
+                # Fix the angular error calculation because right now if we predict 0 and GT is 179, we get 179 which is not correct as the error should be 1
+                angular_error_j3 = torch.where(angular_error_j3 > 90, 180 - angular_error_j3, angular_error_j3)
 
                 # Accumulate for epoch
                 angular_error_j3_total += angular_error_j3.sum().item()
@@ -225,7 +261,9 @@ def train(config=None):
                 y_error_pixel_total += y_error_pixel.sum().item()
 
 
-            epoch_loss = running_loss
+            epoch_loss = running_loss / img_total
+            running_loss_joints /= img_total
+            #running_loss_pixel /= img_total
             mean_ae_j3_train = angular_error_j3_total / img_total
             mean_x_error_pixel_train = x_error_pixel_total / img_total
             mean_y_error_pixel_train = y_error_pixel_total / img_total
@@ -235,66 +273,72 @@ def train(config=None):
             angular_error_j3_total = 0
             x_error_pixel_total = 0
             y_error_pixel_total = 0
+            mean_ae_j3_val = 0
+            mean_x_error_pixel_val = 0
+            mean_y_error_pixel_val = 0
+            if RUN_VALIDATION:
+                dataloader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False)
 
-            # Validation step
-            ee_model.eval()
-            total_img_count = 0
-            with torch.no_grad():
-                for images, joint_values in tqdm.tqdm(dataloader_val, desc=f"Validation Epoch {epoch+1}/{config.epochs}"):
-                    total_img_count += images.size(0)
-                    base_joint_angles = joint_values['base_joint'].numpy()
-                    x = joint_values['x'].numpy()
-                    y = joint_values['y'].numpy()
-                    target_base = torch.tensor([
-                        eefdataset.quantize_joint(base, config.ground_truth_precision, symmetric=True) for base in base_joint_angles
-                    ], dtype=torch.long).to(device)
+                # Validation step
+                ee_model.eval()
+                total_img_count = 0
+                with torch.no_grad():
+                    for images, joint_values in tqdm.tqdm(dataloader_val, desc=f"Validation Epoch {epoch+1}/{config.epochs}"):
+                        total_img_count += images.size(0)
+                        base_joint_angles = joint_values['base_joint'].numpy()
+                        x = joint_values['x'].numpy()
+                        y = joint_values['y'].numpy()
+                        target_base = torch.tensor([
+                            eefdataset.quantize_joint(base, config.ground_truth_precision, symmetric=True) for base in base_joint_angles
+                        ], dtype=torch.long).to(device)
 
-                    images = images.to(device)
+                        images = images.to(device)
 
-                    # Get image width and height
-                    image_width, image_height = images.shape[2], images.shape[3]
+                        # Get image width and height
+                        image_width, image_height = images.shape[2], images.shape[3]
 
-                    target_x = torch.tensor([
-                        (x_val / image_width) for x_val in x
-                    ], dtype=torch.float32).to(device)
-                    target_y = torch.tensor([
-                        (y_val / image_height) for y_val in y
-                    ], dtype=torch.float32).to(device)
+                        target_x = torch.tensor([
+                            (x_val / image_width) for x_val in x
+                        ], dtype=torch.float32).to(device)
+                        target_y = torch.tensor([
+                            (y_val / image_height) for y_val in y
+                        ], dtype=torch.float32).to(device)
 
-                    if torch.any(target_x > 1) or torch.any(target_y > 1):
-                        print(f"Warning: Target pixel coordinates exceed 1 in validation.")
-                        print(f"target_x: {target_x}, target_y: {target_y}")
+                        if torch.any(target_x > 1) or torch.any(target_y > 1):
+                            print(f"Warning: Target pixel coordinates exceed 1 in validation.")
+                            print(f"target_x: {target_x}, target_y: {target_y}")
 
-                    #_, _, j3_logits, _, base_x, base_y = ee_model(images)
-                    j3_logits = ee_model(images)
+                        #_, _, j3_logits, _, base_x, base_y = ee_model(images)
+                        j3_logits = ee_model(images)
 
-                    j3_preds = j3_logits.argmax(dim=1)
-                    j3_pred_angles = eefdataset.class_to_angle(j3_preds, GT_PRECISION)
-                    j3_gt_angles = eefdataset.class_to_angle(target_base, GT_PRECISION)
-                    # Fix the angular error calculation because right now if we predict 0 and GT is 179, we get 179 which is not correct as the error should be 1
-                    angular_error_j3 = torch.abs(j3_pred_angles - j3_gt_angles)
-                    angular_error_j3_total += angular_error_j3.sum().item()
+                        j3_preds = j3_logits.argmax(dim=1)
+                        j3_pred_angles = eefdataset.class_to_angle(j3_preds, GT_PRECISION, symmetric=True)
+                        j3_gt_angles = eefdataset.class_to_angle(target_base, GT_PRECISION, symmetric=True)
+                        
+                        angular_error_j3 = torch.abs(j3_pred_angles - j3_gt_angles)
+                        angular_error_j3 = torch.where(angular_error_j3 > 90, 180 - angular_error_j3, angular_error_j3)
+                        angular_error_j3_total += angular_error_j3.sum().item()
 
-                    target_x = target_x.view(-1, 1)
-                    target_y = target_y.view(-1, 1)
-                    x_error_pixel = torch.abs(target_x - target_x)#torch.abs(base_x - target_x)
-                    y_error_pixel = torch.abs(target_y - target_y)#torch.abs(base_y - target_y)
+                        target_x = target_x.view(-1, 1)
+                        target_y = target_y.view(-1, 1)
+                        x_error_pixel = torch.abs(target_x - target_x)#torch.abs(base_x - target_x)
+                        y_error_pixel = torch.abs(target_y - target_y)#torch.abs(base_y - target_y)
 
-                    if torch.any(x_error_pixel > 1) or torch.any(y_error_pixel > 1):
-                        print(f"Warning: Pixel error exceeds 1 in validation for batch size {config.batch_size}.")
-                        print(f"x_error_pixel: {x_error_pixel}, y_error_pixel: {y_error_pixel}")
+                        if torch.any(x_error_pixel > 1) or torch.any(y_error_pixel > 1):
+                            print(f"Warning: Pixel error exceeds 1 in validation for batch size {batch_size}.")
+                            print(f"x_error_pixel: {x_error_pixel}, y_error_pixel: {y_error_pixel}")
 
-                    x_error_pixel_total += x_error_pixel.sum().item()
-                    y_error_pixel_total += y_error_pixel.sum().item()
-                    if DEBUG > 0:
-                        print(f"Validation batch processed: {images.size(0)} images.")
-                        print(f"x_error_pixel: {x_error_pixel_total}, y_error_pixel: {y_error_pixel_total}")
+                        x_error_pixel_total += x_error_pixel.sum().item()
+                        y_error_pixel_total += y_error_pixel.sum().item()
+                        if DEBUG > 0:
+                            print(f"Validation batch processed: {images.size(0)} images.")
+                            print(f"x_error_pixel: {x_error_pixel_total}, y_error_pixel: {y_error_pixel_total}")
 
-            print(f"Validation: {total_img_count} images processed.")
-            print(f"x_error_pixel_total: {x_error_pixel_total}, y_error_pixel_total: {y_error_pixel_total}")
-            mean_ae_j3_val = angular_error_j3_total / len(dataloader_val.dataset)
-            mean_x_error_pixel_val = x_error_pixel_total / len(dataloader_val.dataset)
-            mean_y_error_pixel_val = y_error_pixel_total / len(dataloader_val.dataset)
+                print(f"Validation: {total_img_count} images processed.")
+                print(f"x_error_pixel_total: {x_error_pixel_total}, y_error_pixel_total: {y_error_pixel_total}")
+                mean_ae_j3_val = angular_error_j3_total / len(dataloader_val.dataset)
+                mean_x_error_pixel_val = x_error_pixel_total / len(dataloader_val.dataset)
+                mean_y_error_pixel_val = y_error_pixel_total / len(dataloader_val.dataset)
 
             print(f"[Epoch {epoch+1}/{config.epochs}] Loss: {epoch_loss:.4f} | J3 AE: {mean_ae_j3_train:.4f}")
             current_lr = optimizer.param_groups[0]['lr']
@@ -305,9 +349,9 @@ def train(config=None):
                 "train_angular_error_joint3": mean_ae_j3_train,
                 "train_x_error_pixel": mean_x_error_pixel_train,
                 "train_y_error_pixel": mean_y_error_pixel_train,
-                "total_loss": epoch_loss,
+                "loss": epoch_loss,
                 "loss_joints": running_loss_joints,
-                "loss_pixel": running_loss_pixel,
+                #"loss_pixel": running_loss_pixel,
                 "val_angular_error_joint3": mean_ae_j3_val,
                 "val_x_error_pixel": mean_x_error_pixel_val,
                 "val_y_error_pixel": mean_y_error_pixel_val
@@ -328,7 +372,6 @@ def train(config=None):
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': epoch_loss,
                 'dinov2_model': config.backbone,
-                'mlp_dim': config.mlp_dim,
                 'num_classes': config.num_classes
             }, checkpoint_path)
 
