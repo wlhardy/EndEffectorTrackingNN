@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-import torchvision.transforms as T
-import torchvision.transforms.functional as TF
+import torchvision.transforms.v2 as T
+import torchvision.transforms.v2.functional as TF
 import matplotlib.pyplot as plt
 import numpy as np
 from collections import defaultdict
@@ -26,8 +26,8 @@ VAL_IMAGE_FOLDER_PATH = "/home/wilah/workspace/SVO_processing/output/20250605-fo
 VAL_JOINT_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202506/joint_values.csv"
 VAL_XY_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202506/center_piece_pixel_coordinates.csv"  # Path to the ground truth file for XY coordinates
 GT_PRECISION = 1 # Degrees that the GT will be rounded to (e.g. if set to 5, then a GT of 12 will be set to 10)
-EPOCHS = 30
-LEARNING_RATE = [1e-4, 1e-5, 1e-6]
+EPOCHS = 50
+LEARNING_RATE = [1e-5, 1e-6, 1e-7, 1e-8]
 BACKBONE = 'dinov2_vitb14_reg'
 NUM_CLASSES = math.ceil(360 / GT_PRECISION)
 MAX_BATCH_SIZE = 4
@@ -36,14 +36,15 @@ LABEL_SMOOTHING_MAX = 0.05
 LABEL_SMOOTHING_MIN = 0.0
 LR_DECAY_POWER = [0.9, 0.95, 0.99, 1.0]
 REDUCE_LABEL_SMOOTHING_MIN = 0.0
-REDUCE_LABEL_SMOOTHING_MAX = 0.25
+REDUCE_LABEL_SMOOTHING_MAX = 0.05
 SAMPLES_PER_CLASS = 3
 LEFT_CROPPING = 398
 RIGHT_CROPPING = 856
 DEBUG = 0
+VERBOSE = 0
 WEIGHT_LOSS_JOINTS = 1.0
 WEIGHT_LOSS_XY = 0.01
-FREEZE_BLOCKS = [0, 2, 4, 6, 8, 10]  # Max number of blocks in the backbone is 11
+FREEZE_BLOCKS = [0, 2, 4, 6]  # Max number of blocks in the backbone is 11
 NBR_TOKEN_PER_TASK = [1, 2, 4]
 TARGET_BATCH_SIZE = [1, 2, 4]#, 8, 16]
 FREEZE_POS_EMBED = True
@@ -106,13 +107,26 @@ def train(config=None):
     with wandb.init(config=config):
         config = wandb.config
         random.seed(config.random_seed)
-        transform = T.Compose([T.Lambda(lambda img: TF.rotate(img, 180)),
-                               T.Lambda(lambda img: TF.crop(img, top=config.top_cropping, left=config.left_cropping, height=img.height - config.bottom_cropping, width=img.width - config.right_cropping)),
-                            T.ToTensor()])
+        transform_val = T.Compose([T.Lambda(lambda img: TF.rotate(img, 180)),
+                                   T.Lambda(lambda img: TF.crop(img, top=config.top_cropping, left=config.left_cropping, height=img.height - config.bottom_cropping, width=img.width - config.right_cropping)),
+                                   T.ToTensor()])
+        transform_train = T.Compose([T.Lambda(lambda img: TF.rotate(img, 180)),
+                                     T.Lambda(lambda img: TF.crop(img, top=config.top_cropping, left=config.left_cropping, height=img.height - config.bottom_cropping, width=img.width - config.right_cropping)),
+                                     T.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.3),
+                                     T.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 2.0)),
+                                     T.RandomInvert(),
+                                     T.RandomPosterize(bits=4),
+                                     T.RandomSolarize(threshold=192),
+                                     T.RandomAdjustSharpness(sharpness_factor=2),
+                                     T.RandomAutocontrast(),
+                                     T.RandomEqualize(),
+                                     T.ToTensor(),
+                                     T.RandomErasing(p=0.5, scale=(0.02, 0.10), ratio=(0.3, 3.3)),
+                                     ])
         dataset_train = eefdataset.EEFDataset(image_dir=config.train_image_folder_path, joint_csv_path=config.train_joint_ground_truth_file_path,
-                                        xy_csv_path=config.train_xy_ground_truth_file_path, joint_precision=1, transform=transform)
+                                        xy_csv_path=config.train_xy_ground_truth_file_path, joint_precision=1, transform=transform_train)
         dataset_val = eefdataset.EEFDataset(image_dir=config.val_image_folder_path, joint_csv_path=config.val_joint_ground_truth_file_path,
-                                        xy_csv_path=config.val_xy_ground_truth_file_path, joint_precision=1, transform=transform)
+                                        xy_csv_path=config.val_xy_ground_truth_file_path, joint_precision=1, transform=transform_val)
         dataset_train.save_to_csv("tmp/dataset.csv")
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -184,6 +198,15 @@ def train(config=None):
                 # Reset the gradients
                 optimizer.zero_grad()
 
+                if DEBUG > 0:
+                    # Save all images in the batch to disk for debugging
+                    for j in range(images.size(0)):
+                        img = images[j].cpu().numpy().transpose(1, 2, 0)
+                        img = (img * 255).astype(np.uint8)
+                        img = Image.fromarray(img)
+                        img_path = os.path.join(checkpoint_dir, f"debug_image_epoch{epoch+1}_batch{i+1}_img{j+1}.png")
+                        img.save(img_path)
+
                 base_joint_angles = joint_values['base_joint'].numpy()
                 x = joint_values['x'].numpy()
                 y = joint_values['y'].numpy()
@@ -222,7 +245,7 @@ def train(config=None):
                 loss.backward()
 
                 # Debug gradient
-                if DEBUG > 0:
+                if VERBOSE > 1:
                     for name, param in ee_model.named_parameters():
                         if param.grad is not None:
                             print(f"Parameter: {name} has gradient.")
@@ -240,8 +263,8 @@ def train(config=None):
 
                 # Convert to angles
                 j3_pred_angles = eefdataset.class_to_angle(j3_preds, config.ground_truth_precision, symmetric=True)
-                j3_gt_angles = eefdataset.class_to_angle(target_base, GT_PRECISION, symmetric=True)
-                if DEBUG > 0:
+                j3_gt_angles = eefdataset.class_to_angle(target_base, config.ground_truth_precision, symmetric=True)
+                if VERBOSE > 0:
                     print(f"j3_pred_angles: {j3_pred_angles}")
                     print(f"target_base: {target_base}")
                     print(f"j3_gt_angles: {j3_gt_angles}")
@@ -312,8 +335,8 @@ def train(config=None):
                         j3_logits = ee_model(images)
 
                         j3_preds = j3_logits.argmax(dim=1)
-                        j3_pred_angles = eefdataset.class_to_angle(j3_preds, GT_PRECISION, symmetric=True)
-                        j3_gt_angles = eefdataset.class_to_angle(target_base, GT_PRECISION, symmetric=True)
+                        j3_pred_angles = eefdataset.class_to_angle(j3_preds, config.ground_truth_precision, symmetric=True)
+                        j3_gt_angles = eefdataset.class_to_angle(target_base, config.ground_truth_precision, symmetric=True)
                         
                         angular_error_j3 = torch.abs(j3_pred_angles - j3_gt_angles)
                         angular_error_j3 = torch.where(angular_error_j3 > 90, 180 - angular_error_j3, angular_error_j3)
@@ -330,7 +353,7 @@ def train(config=None):
 
                         x_error_pixel_total += x_error_pixel.sum().item()
                         y_error_pixel_total += y_error_pixel.sum().item()
-                        if DEBUG > 0:
+                        if VERBOSE > 0:
                             print(f"Validation batch processed: {images.size(0)} images.")
                             print(f"x_error_pixel: {x_error_pixel_total}, y_error_pixel: {y_error_pixel_total}")
 
@@ -372,7 +395,8 @@ def train(config=None):
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': epoch_loss,
                 'dinov2_model': config.backbone,
-                'num_classes': config.num_classes
+                'num_classes': config.num_classes,
+                'num_token_per_class' : config.nbr_token_per_task,
             }, checkpoint_path)
 
 if __name__ == "__main__":

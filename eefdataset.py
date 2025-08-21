@@ -4,10 +4,6 @@ from PIL import Image
 from torch.utils.data import Dataset
 import torch
 import torchvision.transforms as transforms
-import numpy as np
-
-IMAGE_FOLDER_PATH = "/home/wilah/workspace/SVO_processing/output/20250605-for_william./rgb/left"
-JOINT_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth/joint_values.csv"
 
 def get_closest_joint_values(joint_dict, timestamp):
     closest_timestamp = min(joint_dict.keys(), key=lambda t: abs(t - timestamp))
@@ -51,6 +47,9 @@ class EEFDataset(Dataset):
         joint_csv_data = pd.read_csv(joint_csv_path)
         joint_dict = {
             row['timestamp']: {
+                'basemast_to_mast': row['basemast_to_mast'],
+                'mast_to_mainboom': row['mast_to_mainboom'],
+                'stick_to_telescope': row['stick_to_telescope'],
                 'telescope_joint': row['telescope_joint'],
                 'upper_joint': row['upper_joint'],
                 'lower_joint': row['lower_joint'],
@@ -70,12 +69,16 @@ class EEFDataset(Dataset):
         }
 
         already_present = set()
-        key_order = ['telescope_joint', 'upper_joint', 'lower_joint', 'base_joint', 'gripper_joint']
+        key_order = ['basemast_to_mast', 'mast_to_mainboom', 'stick_to_telescope', 'telescope_joint', 'upper_joint', 'lower_joint', 'base_joint', 'gripper_joint']
         # Pair images with closest joint values
         for file_name in sorted(os.listdir(image_dir)):
             if file_name.endswith(".png"):
                 timestamp = int(os.path.splitext(file_name)[0])
                 closest_joint_values, closest_timestamp = get_closest_joint_values(joint_dict, timestamp)
+                # Check if closest timestamp is within 100ms
+                if abs(closest_timestamp - timestamp) > 100:
+                    # Log a warning
+                    print(f"Warning: No close joint values found for image {file_name} (timestamp {timestamp}). Closest timestamp is {closest_timestamp}. Skipping this image.")
                 img_path = os.path.join(image_dir, file_name)
                 values_tuple = tuple(quantize_joint(float(closest_joint_values[key]),joint_precision) for key in key_order)
                 if values_tuple not in already_present:

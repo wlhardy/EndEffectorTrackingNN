@@ -4,33 +4,32 @@ import torchvision.transforms.functional as TF
 import math
 
 import eefdataset
-import model_mlp
+import model_token
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import PIL.Image as Image
 import time
 
 # Configuration
-CHECKPOINT_PATH = "training/checkpoint_20250607_005332/model_checkpoint.pt"
+CHECKPOINT_PATH = "training/checkpoint_20250709_090526/model_checkpoint.pt"
 IMAGE_FOLDER_PATH = "/home/wilah/workspace/SVO_processing/output/20250605-for_william./rgb/left"
 GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202506/joint_values.csv"
 XY_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202506/center_piece_pixel_coordinates.csv"
 GT_PRECISION = 1 # Degrees that the GT will be rounded to (e.g. if set to 5, then a GT of 12 will be set to 10)
 NUM_CLASSES = math.ceil(360 / GT_PRECISION)
-BATCH_SIZE = 32
+BATCH_SIZE = 2
 RANDOM_SEED = 42
-BACKBONE = 'dinov2_vitl14_reg'
-DEBUG = True
+DEBUG = False
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-torch.serialization.add_safe_globals([model_mlp.EndEffectorPosePred])
+torch.serialization.add_safe_globals([model_token.EndEffectorPosePredToken])
 
 # Load the model
 def load_model(model_path):
     checkpoint = torch.load(model_path)
     backbone_model = torch.hub.load('facebookresearch/dinov2', checkpoint['dinov2_model']).to(device)
-    ee_model = model_mlp.EndEffectorPosePred(backbone_model, num_classes=checkpoint['num_classes'], mpl_dim=checkpoint['mlp_dim']).to(device)
+    ee_model = model_token.EndEffectorPosePredToken(backbone_model, num_classes=checkpoint['num_classes'], nbr_tokens=4).to(device)
     ee_model.load_state_dict(checkpoint['model_state_dict'])
     ee_model.eval()
     return ee_model
@@ -54,6 +53,8 @@ upper_y = []
 lower_y = []
 base_y = []
 gripper_y = []
+
+base_preds = []
 
 for images, joint_values in dataloader:
     upper_joint_angles = joint_values['upper_joint'].numpy()
@@ -87,42 +88,26 @@ for images, joint_values in dataloader:
 
     # Compute the time taken for inference
     start_time = time.time()
-    j1_logits, j2_logits, j3_logits, j4_logits, base_x, base_y = ee_model(images)
+    j3_logits = ee_model(images)
     end_time = time.time()
     print(f"Inference time for batch: {end_time - start_time:.4f} seconds")
 
-    j1_preds = j1_logits.argmax(dim=1)
-    j2_preds = j2_logits.argmax(dim=1)
     j3_preds = j3_logits.argmax(dim=1)
-    j4_preds = j4_logits.argmax(dim=1)
 
-    j1_pred_angles = eefdataset.class_to_angle(j1_preds, GT_PRECISION)
-    j2_pred_angles = eefdataset.class_to_angle(j2_preds, GT_PRECISION)
-    j3_pred_angles = eefdataset.class_to_angle(j3_preds, GT_PRECISION)
-    j4_pred_angles = eefdataset.class_to_angle(j4_preds, GT_PRECISION)
+    j3_pred_angles = eefdataset.class_to_angle(j3_preds, GT_PRECISION, symmetric=True)
 
-    j1_gt_angles = eefdataset.class_to_angle(target_upper, GT_PRECISION)
-    j2_gt_angles = eefdataset.class_to_angle(target_lower, GT_PRECISION)
-    j3_gt_angles = eefdataset.class_to_angle(target_base, GT_PRECISION)
-    j4_gt_angles = eefdataset.class_to_angle(target_gripper, GT_PRECISION)
+    j3_gt_angles = eefdataset.class_to_angle(target_base, GT_PRECISION, symmetric=True)
 
     # Compute angular error
-    angular_error_j1 = torch.abs(j1_pred_angles - joint_values['upper_joint'].to(device))
-    angular_error_j2 = torch.abs(j2_pred_angles - joint_values['lower_joint'].to(device))
     angular_error_j3 = torch.abs(j3_pred_angles - joint_values['base_joint'].to(device))
-    angular_error_j4 = torch.abs(j4_pred_angles - joint_values['gripper_joint'].to(device))
-    
+    angular_error_j3 = torch.where(angular_error_j3 > 90, 180 - angular_error_j3, angular_error_j3)
+
     # Add angular error to the corresponding bins
     for i in range(len(images)):
-        upper_x.append(j1_gt_angles[i].item())
-        lower_x.append(j2_gt_angles[i].item())
         base_x.append(j3_gt_angles[i].item())
-        gripper_x.append(j4_gt_angles[i].item())
-
-        upper_y.append(angular_error_j1[i].item())
-        lower_y.append(angular_error_j2[i].item())
         base_y.append(angular_error_j3[i].item())
-        gripper_y.append(angular_error_j4[i].item())
+        base_preds.append(j3_pred_angles[i].item())
+
         if angular_error_j3[i].item() > 10 and DEBUG:
             # Show the image
             print(f"High error for base joint: {j3_gt_angles[i].item()} degrees with error {angular_error_j3[i].item()} degrees")
@@ -146,7 +131,14 @@ def plot_scatter(x, y, title, xlabel, ylabel):
     plt.ylim(0, 180)
     plt.savefig(f"figs/{title.replace(' ', '_').lower()}.png", dpi=300, bbox_inches='tight')
 
-plot_scatter(upper_x, upper_y, "Upper Joint Angle Prediction Error", "Upper Joint Angle (degrees)", "Angular Error (degrees)")
-plot_scatter(lower_x, lower_y, "Lower Joint Angle Prediction Error", "Lower Joint Angle (degrees)", "Angular Error (degrees)")
+def plot_preds(y, title, xlabel):
+    plt.figure(figsize=(10, 6))
+    plt.scatter(range(len(y)), y, s=1)
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel("Predicted Angle (degrees)")
+    plt.grid(axis='y', alpha=0.75)
+    plt.savefig(f"figs/{title.replace(' ', '_').lower()}.png", dpi=300, bbox_inches='tight')
+
 plot_scatter(base_x, base_y, "Base Joint Angle Prediction Error", "Base Joint Angle (degrees)", "Angular Error (degrees)")
-plot_scatter(gripper_x, gripper_y, "Gripper Joint Angle Prediction Error", "Gripper Joint Angle (degrees)", "Angular Error (degrees)")
+plot_preds(base_preds, "Base Joint Angle Predictions", "Sample Index")
