@@ -6,3 +6,8 @@
 /training
 /wandb
 /single_image
+/datasets
+*.png
+*.jpg
+*.jpeg
+/cache

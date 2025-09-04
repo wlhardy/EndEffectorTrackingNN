@@ -6,7 +6,7 @@ from PIL import Image
 import torch.nn.init as init
 import math
 
-TOKEN_LIST = ["joint3"]
+TOKEN_LIST = ["joint3", "base_x", "base_y"]
 #[
     #"joint1", "joint2", "joint3", "joint4",
     #"base_x", "base_y", 
@@ -58,12 +58,14 @@ class EndEffectorPosePredToken(nn.Module):
         self.j1_head = nn.Linear(embed_dim, num_classes)
         self.j2_head = nn.Linear(embed_dim, num_classes)
         self.j4_head = nn.Linear(embed_dim, num_classes)
+        """
         self.base_x_head = nn.Sequential(
             nn.Linear(embed_dim, 1),
             nn.Sigmoid())
         self.base_y_head = nn.Sequential(
             nn.Linear(embed_dim, 1),
             nn.Sigmoid())
+        """
         self.left_claw_x_head = nn.Sequential(
             nn.Linear(embed_dim, 1),
             nn.Sigmoid())
@@ -77,6 +79,7 @@ class EndEffectorPosePredToken(nn.Module):
             nn.Linear(embed_dim, 1),
             nn.Sigmoid())
         """
+        
         self.norm = backbone.norm
 
     def interpolate_pos_encoding(self, x, w, h):
@@ -122,13 +125,13 @@ class EndEffectorPosePredToken(nn.Module):
         for blk in self.backbone.blocks:
             x = blk(x)
         x = self.norm(x)
-        task_token_out = x[:, :self.nbr_tokens]
-        j3_task_token_out = task_token_out.mean(dim=1)
-        #j1_logits = self.j1_head(task_token_out[:, 0])
-        #j2_logits = self.j2_head(task_token_out[:, 1])
-        j3_logits = self.j3_head(j3_task_token_out)
-        #j4_logits = self.j4_head(task_token_out[:, 3])
-        #base_x = self.base_x_head(task_token_out[:, 4])
-        #base_y = self.base_y_head(task_token_out[:, 5])
-        #return j1_logits, j2_logits, j3_logits, j4_logits, base_x, base_y
-        return j3_logits
+        j3_task_token_out = x[:, :self.nbr_tokens]
+        j3_token_mean = j3_task_token_out.mean(dim=1)
+        j3_logits = self.j3_head(j3_token_mean)
+        base_x_token_out = x[:, self.nbr_tokens:2*self.nbr_tokens]
+        base_x_token_mean = base_x_token_out.mean(dim=1)
+        base_x = self.base_x_head(base_x_token_mean)
+        base_y_token_out = x[:, 2*self.nbr_tokens:3*self.nbr_tokens]
+        base_y_token_mean = base_y_token_out.mean(dim=1)
+        base_y = self.base_y_head(base_y_token_mean)
+        return j3_logits, base_x, base_y
