@@ -62,7 +62,7 @@ class EEFDataset(Dataset):
         closest_time_threshold = 5e+7
         time_interval = 6e+10
 
-        # --- Create a unique cache identifier ---
+        # Create a unique cache key based on parameters
         param_dict = {
             "image_dirs": sorted(image_dirs),
             "joint_csv_paths": sorted(joint_csv_paths),
@@ -76,7 +76,7 @@ class EEFDataset(Dataset):
         cache_path = os.path.join(cache_dir, f"{cache_key}_data.pkl")
         meta_path = os.path.join(cache_dir, f"{cache_key}_meta.json")
 
-        # --- Load from cache if available ---
+        # Try to load from cache
         if os.path.exists(cache_path) and os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 meta = json.load(f)
@@ -86,7 +86,7 @@ class EEFDataset(Dataset):
                     self.data = pickle.load(f)
                 return
 
-        # --- Otherwise, build dataset ---
+        # Else process the data
         self.data = []
         joint_dict = {}
         for joint_csv_path in joint_csv_paths:
@@ -156,7 +156,7 @@ class EEFDataset(Dataset):
 
                         self.data.append((img_path, closest_joint_values))
 
-        # --- Save to cache ---
+        # Save to cache
         with open(cache_path, "wb") as f:
             pickle.dump(self.data, f)
         with open(meta_path, "w") as f:
@@ -168,6 +168,8 @@ class EEFDataset(Dataset):
 
     def __getitem__(self, idx):
         img_path, joint_values = self.data[idx]
+        joint_values = joint_values.copy()
+
         image = Image.open(img_path).convert("RGB")
         orig_w, orig_h = image.size
         x_norm = joint_values['x'] / orig_w

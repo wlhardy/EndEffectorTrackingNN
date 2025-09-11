@@ -20,14 +20,6 @@ import eefdataset
 import model_token
 from torch.utils.data import DataLoader, SubsetRandomSampler
 
-# Configuration
-#TRAIN_IMAGE_FOLDER_PATH = "/home/wilah/workspace/EndEffectorTrackingNN/image_subset"
-#TRAIN_IMAGE_FOLDER_PATH = "/home/wilah/workspace/EndEffectorTrackingNN/single_image"
-#TRAIN_JOINT_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202504/joint_values.csv"
-#TRAIN_XY_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202504/center_piece_pixel_coordinates.csv"  # Path to the ground truth file for XY coordinates
-#VAL_IMAGE_FOLDER_PATH = "/home/wilah/workspace/SVO_processing/output/20250605-for_william./rgb/left"
-#VAL_JOINT_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202506/joint_values.csv"
-#VAL_XY_GT_FILE_PATH = "/home/wilah/workspace/EndEffectorTracking/output_ground_truth_202506/center_piece_pixel_coordinates.csv"  # Path to the ground truth file for XY coordinates
 
 MAIN_TRAIN_FOLDER = "/home/wilah/workspace/EndEffectorTrackingNN/datasets/train"
 VAL_TRAIN_FOLDER = "/home/wilah/workspace/EndEffectorTrackingNN/datasets/val"
@@ -36,7 +28,7 @@ EPOCHS = 20
 LEARNING_RATE = [1e-7, 1e-8]
 BACKBONE = 'dinov2_vitb14_reg'
 NUM_CLASSES = math.ceil(360 / GT_PRECISION)
-MAX_BATCH_SIZE = 12
+MAX_BATCH_SIZE = 10
 RANDOM_SEED = 42
 LABEL_SMOOTHING_MAX = 0.05
 LABEL_SMOOTHING_MIN = 0.0
@@ -49,10 +41,10 @@ RIGHT_CROPPING = 856
 DEBUG = 1
 VERBOSE = 0
 WEIGHT_LOSS_JOINTS = 1.0
-WEIGHT_LOSS_XY = 0.01
+WEIGHT_LOSS_XY = 0.1
 FREEZE_BLOCKS = [0, 2, 4, 6]  # Max number of blocks in the backbone is 11
 NBR_TOKEN_PER_TASK = [1]
-TARGET_BATCH_SIZE = [12]
+TARGET_BATCH_SIZE = [10]
 FREEZE_POS_EMBED = True
 FREEZE_PATCH_EMBED = True
 RUN_VALIDATION = True
@@ -89,10 +81,13 @@ sweep_config = {
     },
 }
 
-def save_debug_image(image_tensor, joint_values, save_path):
+def save_debug_image(image_tensor, joint_values, save_path,
+                     pred_x=None, pred_y=None, pred_angle=None):
     """
     image_tensor: (C,H,W) tensor in [0,1]
-    joint_values: dict with 'x', 'y', 'base_joint'
+    joint_values: dict with 'x', 'y', 'base_joint' (ground truth)
+    pred_x, pred_y: predicted pixel coordinates (optional)
+    pred_angle: predicted base joint angle in degrees (optional)
     save_path: where to save the debug image
     """
     img = image_tensor.permute(1, 2, 0).cpu().numpy()  # (H,W,C)
@@ -102,17 +97,24 @@ def save_debug_image(image_tensor, joint_values, save_path):
     ax.imshow(img)
     
     # Overlay GT point
-    ax.scatter(joint_values['x'], joint_values['y'], c='red', s=40, marker='x')
-    
-    # Write angle at bottom
-    angle_text = f"Base joint: {joint_values['base_joint']:.1f}°"
+    ax.scatter(joint_values['x'], joint_values['y'], c='red', s=40, marker='x', label="GT")
+
+    # Overlay prediction if provided
+    if pred_x is not None and pred_y is not None:
+        ax.scatter(pred_x, pred_y, c='lime', s=40, marker='o', label="Prediction")
+
+    # Write angles at bottom
+    angle_text = f"GT: {joint_values['base_joint']:.1f}°"
+    if pred_angle is not None:
+        angle_text += f" | Pred: {pred_angle:.1f}°"
     ax.text(
         0.5, 1.02, angle_text,
         transform=ax.transAxes, ha='center', va='bottom',
         fontsize=10, color='white', backgroundcolor='black'
     )
-    
+
     ax.axis('off')
+    ax.legend(loc="lower right", fontsize=8, facecolor="black", edgecolor="white", labelcolor="white")
     fig.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
 
@@ -295,18 +297,7 @@ def train(config=None):
                         img = Image.fromarray(img)
                         img_path = os.path.join(checkpoint_dir, f"debug_image_epoch{epoch+1}_batch{i+1}_img{j+1}.png")
                         img.save(img_path)
-                elif DEBUG > 0:
-                    if (i % 500 == 0) and (images.size(0) > 0):
-                        debug_dir = os.path.join(checkpoint_dir, "debug_samples")
-                        os.makedirs(debug_dir, exist_ok=True)
-                        save_debug_image(
-                            images[0],   # first image in batch
-                            {k: v[0].item() if hasattr(v, 'numpy') or torch.is_tensor(v) else v
-                            for k, v in joint_values.items()},
-                            os.path.join(debug_dir, f"train_epoch{epoch+1}_batch{i+1}.png")
-                        )
                     
-
                 base_joint_angles = joint_values['base_joint'].numpy()
                 x = joint_values['x'].numpy()
                 y = joint_values['y'].numpy()
@@ -396,6 +387,20 @@ def train(config=None):
                 x_error_pixel_total += x_error_pixel.sum().item()
                 y_error_pixel_total += y_error_pixel.sum().item()
 
+                if DEBUG > 0:
+                    if (i % 5 == 0) and (images.size(0) > 0):
+                        debug_dir = os.path.join(checkpoint_dir, "debug_samples")
+                        os.makedirs(debug_dir, exist_ok=True)
+                        save_debug_image(
+                            images[0],   # first image in batch
+                            {k: v[0].item() if hasattr(v, 'numpy') or torch.is_tensor(v) else v
+                            for k, v in joint_values.items()},
+                            os.path.join(debug_dir, f"train_epoch{epoch+1}_batch{i+1}.png"),
+                            pred_x=base_x[0].item() * images.shape[3],   # convert normalized back to pixels
+                            pred_y=base_y[0].item() * images.shape[2],
+                            pred_angle=j3_pred_angles[0].item()
+                        )
+
 
             epoch_loss = running_loss / img_total
             running_loss_joints /= img_total
@@ -413,7 +418,7 @@ def train(config=None):
             mean_x_error_pixel_val = 0
             mean_y_error_pixel_val = 0
             if RUN_VALIDATION:
-                dataloader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False)
+                dataloader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, num_workers=cpu_count)
 
                 # Validation step
                 ee_model.eval()
@@ -429,17 +434,6 @@ def train(config=None):
                         ], dtype=torch.long).to(device)
 
                         images = images.to(device)
-
-                        if DEBUG > 0:
-                            if (i % 500 == 0) and (images.size(0) > 0):
-                                debug_dir = os.path.join(checkpoint_dir, "debug_samples")
-                                os.makedirs(debug_dir, exist_ok=True)
-                                save_debug_image(
-                                    images[0],   # first image in batch
-                                    {k: v[0].item() if hasattr(v, 'numpy') or torch.is_tensor(v) else v
-                                    for k, v in joint_values.items()},
-                                    os.path.join(debug_dir, f"val_epoch{epoch+1}_batch{i+1}.png")
-                                )
 
                         # Get image width and height
                         image_width, image_height = images.shape[2], images.shape[3]
@@ -479,6 +473,20 @@ def train(config=None):
                         if VERBOSE > 0:
                             print(f"Validation batch processed: {images.size(0)} images.")
                             print(f"x_error_pixel: {x_error_pixel_total}, y_error_pixel: {y_error_pixel_total}")
+
+                        if DEBUG > 0:
+                            if (i % 5 == 0) and (images.size(0) > 0):
+                                debug_dir = os.path.join(checkpoint_dir, "debug_samples")
+                                os.makedirs(debug_dir, exist_ok=True)
+                                save_debug_image(
+                                    images[0],   # first image in batch
+                                    {k: v[0].item() if hasattr(v, 'numpy') or torch.is_tensor(v) else v
+                                    for k, v in joint_values.items()},
+                                    os.path.join(debug_dir, f"val_epoch{epoch+1}_batch{i+1}.png"),
+                                    pred_x=base_x[0].item() * images.shape[3],   # convert normalized back to pixels
+                                    pred_y=base_y[0].item() * images.shape[2],
+                                    pred_angle=j3_pred_angles[0].item()
+                                )
 
                 print(f"Validation: {total_img_count} images processed.")
                 print(f"x_error_pixel_total: {x_error_pixel_total}, y_error_pixel_total: {y_error_pixel_total}")
@@ -524,4 +532,4 @@ def train(config=None):
 
 if __name__ == "__main__":
     sweep_id = wandb.sweep(sweep_config, project="EndEffectorPosePred")
-    wandb.agent(sweep_id, train, count=20)
+    wandb.agent(sweep_id, train, count=40)
