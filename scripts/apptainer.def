@@ -1,0 +1,21 @@
+Bootstrap: docker
+From: nvcr.io/nvidia/pytorch:25.01-py3
+
+%environment
+    export LD_LIBRARY_PATH=/opt/conda/lib:/usr/local/cuda/lib64:/usr/local/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+    export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+%files
+    ../requirements.txt /requirements.txt
+
+%post
+    pip install --upgrade pip
+    pip install -r /requirements.txt
+
+%runscript
+    bash
+
+%labels
+    Author wilah
+    Version v1.0
+    ContactEmail william.larrivee-hardy@norlab.ulaval.ca
