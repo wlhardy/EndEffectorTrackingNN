@@ -42,7 +42,7 @@ def class_to_angle(class_idx, precision, symmetric=False, center=False):
 
 class EEFDataset(Dataset):
     def __init__(self, image_dirs, joint_csv_paths, xy_csv_paths=None,
-                 joint_precision=1, transform=None, cache_dir="cache"):
+                 joint_precision=1, transform=None, cache_dir=".cache"):
 
         if isinstance(image_dirs, str):
             image_dirs = [image_dirs]

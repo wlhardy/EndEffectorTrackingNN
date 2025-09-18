@@ -2,13 +2,13 @@
 /__pycache__
 /figs
 /image_subset
-/tmp
 /training
 /wandb
 /single_image
 /datasets
+/.tmp
+/.cache
 *.png
 *.jpg
 *.jpeg
-/cache
 *.sif

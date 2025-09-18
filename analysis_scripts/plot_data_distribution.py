@@ -4,9 +4,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Path to the CSV file
-csv_path = 'tmp/val_dataset.csv'
+csv_path = '.tmp/val_dataset.csv'
 # Output directory for plots
-output_dir = 'tmp/data_distribution_plots_val_set'
+output_dir = '.tmp/data_distribution_plots_val_set'
 os.makedirs(output_dir, exist_ok=True)
 
 # Read the CSV file

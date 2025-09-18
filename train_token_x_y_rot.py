@@ -213,8 +213,8 @@ def train(config=None):
             dataset_val = eefdataset.EEFDataset(image_dirs=val_image_dirs, joint_csv_paths=val_joint_csvs,
                                             xy_csv_paths=val_xy_csvs, joint_precision=1, transform=transform_val)
             
-            dataset_train.save_to_csv("tmp/train_dataset.csv")
-            dataset_val.save_to_csv("tmp/val_dataset.csv")
+            dataset_train.save_to_csv(".tmp/train_dataset.csv")
+            dataset_val.save_to_csv(".tmp/val_dataset.csv")
 
             end_time = datetime.datetime.now()
             time_to_build = end_time - start_time
