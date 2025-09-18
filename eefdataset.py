@@ -9,8 +9,6 @@ import pickle
 import hashlib
 import json
 import math
-from bisect import bisect_left
-
 
 def get_closest_dict_value(data_dict, timestamp):
     closest_timestamp = min(data_dict.keys(), key=lambda t: abs(t - timestamp))
