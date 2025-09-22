@@ -12,3 +12,4 @@
 *.jpg
 *.jpeg
 *.sif
+/slurm_output

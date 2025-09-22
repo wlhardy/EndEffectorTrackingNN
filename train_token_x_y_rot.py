@@ -23,8 +23,8 @@ import model_token
 
 matplotlib.use("Agg")
 
-MAIN_TRAIN_FOLDER = "/home/wilah/workspace/EndEffectorTrackingNN/datasets/train"
-VAL_TRAIN_FOLDER = "/home/wilah/workspace/EndEffectorTrackingNN/datasets/val"
+MAIN_TRAIN_FOLDER = "/datasets/train"
+VAL_TRAIN_FOLDER = "/datasets/val"
 GT_PRECISION = 1 # Degrees that the GT will be rounded to (e.g. if set to 5, then a GT of 12 will be set to 10)
 EPOCHS = 40
 LEARNING_RATE = [1e-7, 1e-8]
