@@ -5,4 +5,4 @@
 #SBATCH --job-name=eepp_train
 #SBATCH --output=%x-%j.out
 
-apptainer instance run --nv --bind /data.wilah_dataset:./datasets/ ./scripts/train_token_dinov2_EEPP.sif eepp_training
+apptainer instance run --nv --bind /datasets/eepp:/datasets ./scripts/train_token_dinov2_EEPP.sif eepp_training
