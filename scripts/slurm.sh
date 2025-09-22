@@ -5,4 +5,5 @@
 #SBATCH --job-name=eepp_train
 #SBATCH --output=slurm_output/%x-%j.out
 
-apptainer exec --nv --bind /datasets/eepp:/datasets --bind /etc/pki:/etc/pki ./scripts/train_token_dinov2_EEPP.sif bash
+apptainer exec --nv --bind /datasets/eepp:/datasets --bind /etc/pki:/etc/pki ./scripts/train_token_dinov2_EEPP.sif bash \
+    -c "python3 train_token_x_y_rot.py"
