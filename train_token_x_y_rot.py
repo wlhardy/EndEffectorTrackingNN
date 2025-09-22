@@ -224,7 +224,7 @@ def train(config=None):
             print(f"Using device: {device}")
 
             # Load DINOv2
-            backbone_model = torch.hub.load('facebookresearch/dinov2', config['backbone']).to(device)
+            backbone_model = torch.hub.load('facebookresearch/dinov2', config['backbone'], force_reload=False).to(device)
             for param in backbone_model.parameters():
                 param.requires_grad = True
 
