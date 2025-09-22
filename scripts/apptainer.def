@@ -11,9 +11,10 @@ From: pytorch/pytorch:2.8.0-cuda12.9-cudnn9-runtime
 %post
     pip install --upgrade pip
     pip install -r /requirements.txt
+    update-ca-certificates
 
 %runscript
-    exec python3 /home/wilah/workspace/EndEffectorTrackingNN/train_token.py "$@"
+    bash
 
 %labels
     Author wilah

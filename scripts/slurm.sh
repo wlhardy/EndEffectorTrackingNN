@@ -5,4 +5,4 @@
 #SBATCH --job-name=eepp_train
 #SBATCH --output=%x-%j.out
 
-apptainer instance run --nv --bind /datasets/eepp:/datasets ./scripts/train_token_dinov2_EEPP.sif eepp_training
+apptainer exec --nv --bind /datasets/eepp:/datasets --bind /etc/pki:/etc/pki ./scripts/train_token_dinov2_EEPP.sif bash
