@@ -4,6 +4,7 @@ From: pytorch/pytorch:2.8.0-cuda12.9-cudnn9-runtime
 %environment
     export LD_LIBRARY_PATH=/opt/conda/lib:/usr/local/cuda/lib64:/usr/local/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
     export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+    export TORCH_HOME=/opt/pytorch_models
 
 %files
     ../requirements.txt /requirements.txt
@@ -12,6 +13,9 @@ From: pytorch/pytorch:2.8.0-cuda12.9-cudnn9-runtime
     pip install --upgrade pip
     pip install -r /requirements.txt
     update-ca-certificates
+    mkdir -p /opt/pytorch_models
+    export TORCH_HOME=/opt/pytorch_models
+    python -c "import torch; torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14_reg')"
 
 %runscript
     bash

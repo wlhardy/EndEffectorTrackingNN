@@ -13,3 +13,4 @@
 *.jpeg
 *.sif
 /slurm_output
+/torch_models
