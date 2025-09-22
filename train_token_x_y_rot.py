@@ -531,5 +531,18 @@ def train(config=None):
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
+    api_key = os.environ.get("WANDB_API_KEY")
+    if not api_key:
+        try:
+            with open("/run/wandb_api_key.txt", "r") as f:
+                api_key = f.read().strip()
+        except FileNotFoundError:
+            print("API key not found")
+            exit(1)
+    if api_key:
+        wandb.login(key=api_key)
+        print("Logged into wandb successfully.")
+    else:
+        print("WANDB_API_KEY or secret file not found. Skipping wandb login.")
     sweep_id = wandb.sweep(sweep_config, project="EndEffectorPosePred")
     wandb.agent(sweep_id, train, count=40)
