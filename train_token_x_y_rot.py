@@ -16,6 +16,7 @@ import random
 import datetime
 import tqdm
 import multiprocessing
+import time
 from torch.utils.data import DataLoader, SubsetRandomSampler
 
 import eefdataset
@@ -23,8 +24,8 @@ import model_token
 
 matplotlib.use("Agg")
 
-MAIN_TRAIN_FOLDER = "/datasets/train"
-VAL_TRAIN_FOLDER = "/datasets/val"
+MAIN_TRAIN_FOLDER = "./datasets/train"
+VAL_TRAIN_FOLDER = "./datasets/val"
 GT_PRECISION = 1 # Degrees that the GT will be rounded to (e.g. if set to 5, then a GT of 12 will be set to 10)
 EPOCHS = 40
 LEARNING_RATE = [1e-7, 1e-8]
@@ -50,6 +51,8 @@ TARGET_BATCH_SIZE = [2]
 FREEZE_POS_EMBED = True
 FREEZE_PATCH_EMBED = True
 RUN_VALIDATION = True
+XY_BIN_NBR = 100
+COMPUTE_ERROR_IN_TRAINING = True
 
 sweep_config = {
     "method": "random",
@@ -80,11 +83,13 @@ sweep_config = {
         "nbr_token_per_task": {"values": NBR_TOKEN_PER_TASK},
         "freeze_pos_embed": {"value": FREEZE_POS_EMBED},
         "freeze_patch_embed": {"value": FREEZE_PATCH_EMBED},
+        "xy_bin_nbr": {"value": XY_BIN_NBR}
     },
 }
 
 def save_debug_image(image_tensor, joint_values, save_path,
-                     pred_x=None, pred_y=None, pred_angle=None):
+                     pred_x=None, pred_y=None, pred_angle=None,
+                     nbr_bins_xy=100):
     """
     image_tensor: (C,H,W) tensor in [0,1]
     joint_values: dict with 'x', 'y', 'base_joint' (ground truth)
@@ -98,8 +103,11 @@ def save_debug_image(image_tensor, joint_values, save_path,
     fig, ax = plt.subplots()
     ax.imshow(img)
     
+    x = joint_values['x'] * image_tensor.shape[2] / nbr_bins_xy
+    y = joint_values['y'] * image_tensor.shape[1] / nbr_bins_xy
+
     # Overlay GT point
-    ax.scatter(joint_values['x'], joint_values['y'], c='red', s=40, marker='x', label="GT")
+    ax.scatter(x, y, c='red', s=40, marker='x', label="GT")
 
     # Overlay prediction if provided
     if pred_x is not None and pred_y is not None:
@@ -203,7 +211,8 @@ def train(config=None):
                                         ])
             train_image_dirs, train_joint_csvs, train_xy_csvs = discover_dataset_folders(config.train_main_folder_path)
             dataset_train = eefdataset.EEFDataset(image_dirs=train_image_dirs, joint_csv_paths=train_joint_csvs,
-                                            xy_csv_paths=train_xy_csvs, joint_precision=1, transform=transform_train)
+                                            xy_csv_paths=train_xy_csvs, joint_precision=config.ground_truth_precision,
+                                            xy_bin_nbr=100, transform=transform_train)
             
             transform_val = T.Compose([T.Lambda(lambda img: TF.rotate(img, 180)),
                                     T.Lambda(lambda img: TF.crop(img, top=config.top_cropping, left=config.left_cropping, height=img.height - config.bottom_cropping, width=img.width - config.right_cropping)),
@@ -211,7 +220,8 @@ def train(config=None):
                                     T.ToTensor()])
             val_image_dirs, val_joint_csvs, val_xy_csvs = discover_dataset_folders(config.val_main_folder_path)
             dataset_val = eefdataset.EEFDataset(image_dirs=val_image_dirs, joint_csv_paths=val_joint_csvs,
-                                            xy_csv_paths=val_xy_csvs, joint_precision=1, transform=transform_val)
+                                            xy_csv_paths=val_xy_csvs, joint_precision=config.ground_truth_precision,
+                                            xy_bin_nbr=100, transform=transform_val)
             
             dataset_train.save_to_csv(".tmp/train_dataset.csv")
             dataset_val.save_to_csv(".tmp/val_dataset.csv")
@@ -242,8 +252,10 @@ def train(config=None):
                 print("Freezing patch embedding.")
                 backbone_model.patch_embed.requires_grad = False
 
+            xy_bin_nbr = config.xy_bin_nbr
+
             # Load model
-            ee_model = model_token.EndEffectorPosePredToken(backbone_model, num_classes=config.num_classes, nbr_tokens=config.nbr_token_per_task).to(device)
+            ee_model = model_token.EndEffectorPosePredToken(backbone_model, num_classes_joint=config.num_classes, nbr_classes_xy=xy_bin_nbr, nbr_tokens=config.nbr_token_per_task).to(device)
             optimizer = torch.optim.AdamW(ee_model.parameters(), lr=config.learning_rate)
             
             scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer,
@@ -251,7 +263,7 @@ def train(config=None):
                                                             power=config.lr_decay_power)
 
             criterion_joints = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
-            criterion_pixel = nn.MSELoss()
+            criterion_pixel = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
 
             # Create a directory to log checkpoints and results
             os.makedirs("training", exist_ok=True)
@@ -280,13 +292,18 @@ def train(config=None):
                 running_loss_joints = 0
                 running_loss_pixel = 0
                 img_total = 0
-                angular_error_j3_total = 0
-                x_error_pixel_total = 0
-                y_error_pixel_total = 0
+                angular_error_base_joint_total = 0
+                x_error_bin_total = 0
+                y_error_bin_total = 0
 
                 for i, (images, joint_values) in enumerate(tqdm.tqdm(dataloader_train, desc=f"Epoch {epoch+1}/{config.epochs}")):
+                    # Start a timer to measure the training step duration
+                    step_start_time = time.time()
                     # Reset the gradients
                     optimizer.zero_grad()
+                    base_joint_quant = joint_values['base_joint_quant'].to(device)
+                    base_x = joint_values['x'].to(device)
+                    base_y = joint_values['y'].to(device)
 
                     if DEBUG > 2:
                         # Save all images in the batch to disk for debugging
@@ -296,49 +313,14 @@ def train(config=None):
                             img = Image.fromarray(img)
                             img_path = os.path.join(checkpoint_dir, f"debug_image_epoch{epoch+1}_batch{i+1}_img{j+1}.png")
                             img.save(img_path)
-                        
-                    base_joint_angles = joint_values['base_joint'].numpy()
-                    x = joint_values['x'].numpy()
-                    y = joint_values['y'].numpy()
-                    target_base = torch.tensor([
-                        eefdataset.quantize_joint(base, config.ground_truth_precision, symmetric=True) for base in base_joint_angles
-                    ], dtype=torch.long).to(device)
-
-                    if torch.any(target_base < 0) or torch.any(target_base >= (config.num_classes / 2)):
-                        print("Invalid target detected!")
-                        print(f"target_base: {target_base}")
-                        print(f"num_classes: {config.num_classes}")
-                        exit()
 
                     images = images.to(device)
 
-                    # Get image width and height
-                    image_width, image_height = images.shape[2], images.shape[3]
-
-                    target_x = torch.tensor([
-                        (x_val / image_width) for x_val in x
-                    ], dtype=torch.float32).to(device)
-                    target_y = torch.tensor([
-                        (y_val / image_height) for y_val in y
-                    ], dtype=torch.float32).to(device)
-
-                    #_, _, j3_logits, _, base_x, base_y = ee_model(images)
-                    j3_logits, base_x, base_y = ee_model(images)
-
-                    # Check if j3_logits is within class range
-                    if torch.any(j3_logits.argmax(dim=1) < 0) or torch.any(j3_logits.argmax(dim=1) >= (config.num_classes / 2)):
-                        print("Invalid j3_logits detected!")
-                        print(f"j3_logits: {j3_logits}")
-                        print(f"num_classes: {config.num_classes}")
-                        exit()
+                    base_joint_logits, base_x_logits, base_y_logits = ee_model(images)
 
                     # Compute loss
-                    loss_joints = criterion_joints(j3_logits, target_base)
-                    
-                    # Reshape base_x and base_y to match target_x and target_y
-                    target_x = target_x.view(-1, 1)
-                    target_y = target_y.view(-1, 1)
-                    loss_pixel = criterion_pixel(base_x, target_x) + criterion_pixel(base_y, target_y)
+                    loss_joints = criterion_joints(base_joint_logits, base_joint_quant)
+                    loss_pixel = criterion_pixel(base_x_logits, base_x) + criterion_pixel(base_y_logits, base_y)
                     
                     loss = (loss_joints * config.weight_loss_joints) + (loss_pixel * config.weight_loss_xy)
                     running_loss += loss.item()
@@ -361,61 +343,63 @@ def train(config=None):
 
                     img_total += images.size(0)
 
-                    # Predictions
-                    j3_preds = j3_logits.argmax(dim=1)
+                    if COMPUTE_ERROR_IN_TRAINING:
+                        # Predictions
+                        base_joint_preds = base_joint_logits.argmax(dim=1)
+                        base_x_preds = base_x_logits.argmax(dim=1)
+                        base_y_preds = base_y_logits.argmax(dim=1)
 
-                    # Convert to angles
-                    j3_pred_angles = eefdataset.class_to_angle(j3_preds, config.ground_truth_precision, symmetric=True)
-                    j3_gt_angles = eefdataset.class_to_angle(target_base, config.ground_truth_precision, symmetric=True)
-                    if VERBOSE > 0:
-                        print(f"j3_pred_angles: {j3_pred_angles}")
-                        print(f"target_base: {target_base}")
-                        print(f"j3_gt_angles: {j3_gt_angles}")
+                        # Convert to angles
+                        base_joint_pred_angles = eefdataset.class_to_angle(base_joint_preds, config.ground_truth_precision, symmetric=True)
+                        base_joint_gt_angles = eefdataset.class_to_angle(base_joint_quant, config.ground_truth_precision, symmetric=True)
+                        if VERBOSE > 0:
+                            print(f"base_joint_pred_angles: {base_joint_pred_angles}")
+                            print(f"target_base: {base_joint_quant}")
+                            print(f"base_joint_gt_angles: {base_joint_gt_angles}")
 
-                    # Compute angular error
-                    angular_error_j3 = torch.abs(j3_pred_angles - j3_gt_angles)
+                        # Compute angular error
+                        angular_error_base_joint = torch.abs(base_joint_pred_angles - base_joint_gt_angles)
 
-                    # Fix the angular error calculation because right now if we predict 0 and GT is 179, we get 179 which is not correct as the error should be 1
-                    angular_error_j3 = torch.where(angular_error_j3 > 90, 180 - angular_error_j3, angular_error_j3)
+                        # Fix the angular error calculation because right now if we predict 0 and GT is 179, we get 179 which is not correct as the error should be 1
+                        angular_error_base_joint = torch.where(angular_error_base_joint > 90, 180 - angular_error_base_joint, angular_error_base_joint)
 
-                    # Accumulate for epoch
-                    angular_error_j3_total += angular_error_j3.sum().item()
+                        # Accumulate for epoch
+                        angular_error_base_joint_total += angular_error_base_joint.sum().item()
 
-                    x_error_pixel = torch.abs(base_x - target_x)
-                    y_error_pixel = torch.abs(base_y - target_y)
-                    x_error_pixel_total += x_error_pixel.sum().item()
-                    y_error_pixel_total += y_error_pixel.sum().item()
+                        x_error_bin = torch.abs(base_x_preds - base_x)
+                        y_error_bin = torch.abs(base_y_preds - base_y)
+                        x_error_bin_total += x_error_bin.sum().item()
+                        y_error_bin_total += y_error_bin.sum().item()
 
-                    if DEBUG > 0:
-                        if (i % 5 == 0) and (images.size(0) > 0):
-                            debug_dir = os.path.join(checkpoint_dir, "debug_samples")
-                            os.makedirs(debug_dir, exist_ok=True)
-                            save_debug_image(
-                                images[0],   # first image in batch
-                                {k: v[0].item() if hasattr(v, 'numpy') or torch.is_tensor(v) else v
-                                for k, v in joint_values.items()},
-                                os.path.join(debug_dir, f"train_epoch{epoch+1}_batch{i+1}.png"),
-                                pred_x=base_x[0].item() * images.shape[3],   # convert normalized back to pixels
-                                pred_y=base_y[0].item() * images.shape[2],
-                                pred_angle=j3_pred_angles[0].item()
-                            )
-
+                        if DEBUG > 0:
+                            if (i % 5 == 0) and (images.size(0) > 0):
+                                debug_dir = os.path.join(checkpoint_dir, "debug_samples")
+                                os.makedirs(debug_dir, exist_ok=True)
+                                save_debug_image(
+                                    images[0],   # first image in batch
+                                    {k: v[0].item() if hasattr(v, 'numpy') or torch.is_tensor(v) else v
+                                    for k, v in joint_values.items()},
+                                    os.path.join(debug_dir, f"train_epoch{epoch+1}_batch{i+1}.png"),
+                                    pred_x=base_x_preds[0].item() / xy_bin_nbr * images.shape[3],   # convert normalized back to pixels
+                                    pred_y=base_y_preds[0].item() / xy_bin_nbr * images.shape[2],
+                                    pred_angle=base_joint_pred_angles[0].item()
+                                )
 
                 epoch_loss = running_loss / img_total
                 running_loss_joints /= img_total
                 running_loss_pixel /= img_total
-                mean_ae_j3_train = angular_error_j3_total / img_total
-                mean_x_error_pixel_train = x_error_pixel_total / img_total
-                mean_y_error_pixel_train = y_error_pixel_total / img_total
+                mean_ae_base_joint_train = angular_error_base_joint_total / img_total
+                mean_x_error_bin_train = x_error_bin_total / img_total
+                mean_y_error_bin_train = y_error_bin_total / img_total
 
                 scheduler.step()
 
-                angular_error_j3_total = 0
-                x_error_pixel_total = 0
-                y_error_pixel_total = 0
-                mean_ae_j3_val = 0
-                mean_x_error_pixel_val = 0
-                mean_y_error_pixel_val = 0
+                angular_error_base_joint_total = 0
+                x_error_bin_total = 0
+                y_error_bin_total = 0
+                mean_ae_base_joint_val = 0
+                mean_x_error_bin_val = 0
+                mean_y_error_bin_val = 0
                 if RUN_VALIDATION:
                     # Validation step
                     ee_model.eval()
@@ -423,53 +407,37 @@ def train(config=None):
                     with torch.no_grad():
                         for i, (images, joint_values) in enumerate(tqdm.tqdm(dataloader_val, desc=f"Validation Epoch {epoch+1}/{config.epochs}")):
                             total_img_count += images.size(0)
-                            base_joint_angles = joint_values['base_joint'].numpy()
-                            x = joint_values['x'].numpy()
-                            y = joint_values['y'].numpy()
-                            target_base = torch.tensor([
-                                eefdataset.quantize_joint(base, config.ground_truth_precision, symmetric=True) for base in base_joint_angles
-                            ], dtype=torch.long).to(device)
+
+                            base_joint_quant = joint_values['base_joint_quant'].to(device)
+                            base_x = joint_values['x'].to(device)
+                            base_y = joint_values['y'].to(device)
 
                             images = images.to(device)
 
-                            # Get image width and height
-                            image_width, image_height = images.shape[2], images.shape[3]
+                            if torch.any(base_x > xy_bin_nbr) or torch.any(base_y > xy_bin_nbr):
+                                print(f"Warning: Target pixel coordinates exceed xy_bin_nbr in validation.")
+                                print(f"target_x: {base_x}, target_y: {base_y}")
 
-                            target_x = torch.tensor([
-                                (x_val / image_width) for x_val in x
-                            ], dtype=torch.float32).to(device)
-                            target_y = torch.tensor([
-                                (y_val / image_height) for y_val in y
-                            ], dtype=torch.float32).to(device)
+                            base_joint_logits, base_x_logits, base_y_logits = ee_model(images)
 
-                            if torch.any(target_x > 1) or torch.any(target_y > 1):
-                                print(f"Warning: Target pixel coordinates exceed 1 in validation.")
-                                print(f"target_x: {target_x}, target_y: {target_y}")
-
-                            j3_logits, base_x, base_y = ee_model(images)
-
-                            j3_preds = j3_logits.argmax(dim=1)
-                            j3_pred_angles = eefdataset.class_to_angle(j3_preds, config.ground_truth_precision, symmetric=True)
-                            j3_gt_angles = eefdataset.class_to_angle(target_base, config.ground_truth_precision, symmetric=True)
+                            base_joint_preds = base_joint_logits.argmax(dim=1)
+                            base_x_preds = base_x_logits.argmax(dim=1)
+                            base_y_preds = base_y_logits.argmax(dim=1)
+                            base_joint_pred_angles = eefdataset.class_to_angle(base_joint_preds, config.ground_truth_precision, symmetric=True)
+                            base_joint_gt_angles = eefdataset.class_to_angle(base_joint_quant, config.ground_truth_precision, symmetric=True)
                             
-                            angular_error_j3 = torch.abs(j3_pred_angles - j3_gt_angles)
-                            angular_error_j3 = torch.where(angular_error_j3 > 90, 180 - angular_error_j3, angular_error_j3)
-                            angular_error_j3_total += angular_error_j3.sum().item()
+                            angular_error_base_joint = torch.abs(base_joint_pred_angles - base_joint_gt_angles)
+                            angular_error_base_joint = torch.where(angular_error_base_joint > 90, 180 - angular_error_base_joint, angular_error_base_joint)
+                            angular_error_base_joint_total += angular_error_base_joint.sum().item()
 
-                            target_x = target_x.view(-1, 1)
-                            target_y = target_y.view(-1, 1)
-                            x_error_pixel = torch.abs(base_x - target_x)
-                            y_error_pixel = torch.abs(base_y - target_y)
+                            x_error_bin = torch.abs(base_x_preds - base_x)
+                            y_error_bin = torch.abs(base_y_preds - base_y)
 
-                            if torch.any(x_error_pixel > 1) or torch.any(y_error_pixel > 1):
-                                print(f"Warning: Pixel error exceeds 1 in validation for batch size {batch_size}.")
-                                print(f"x_error_pixel: {x_error_pixel}, y_error_pixel: {y_error_pixel}")
-
-                            x_error_pixel_total += x_error_pixel.sum().item()
-                            y_error_pixel_total += y_error_pixel.sum().item()
+                            x_error_bin_total += x_error_bin.sum().item()
+                            y_error_bin_total += y_error_bin.sum().item()
                             if VERBOSE > 0:
                                 print(f"Validation batch processed: {images.size(0)} images.")
-                                print(f"x_error_pixel: {x_error_pixel_total}, y_error_pixel: {y_error_pixel_total}")
+                                print(f"x_error_bin: {x_error_bin_total}, y_error_bin: {y_error_bin_total}")
 
                             if DEBUG > 0:
                                 if (i % 5 == 0) and (images.size(0) > 0):
@@ -480,32 +448,32 @@ def train(config=None):
                                         {k: v[0].item() if hasattr(v, 'numpy') or torch.is_tensor(v) else v
                                         for k, v in joint_values.items()},
                                         os.path.join(debug_dir, f"val_epoch{epoch+1}_batch{i+1}.png"),
-                                        pred_x=base_x[0].item() * images.shape[3],   # convert normalized back to pixels
-                                        pred_y=base_y[0].item() * images.shape[2],
-                                        pred_angle=j3_pred_angles[0].item()
+                                        pred_x=base_x_preds[0].item() / xy_bin_nbr * images.shape[3],   # convert normalized back to pixels
+                                        pred_y=base_y_preds[0].item() / xy_bin_nbr * images.shape[2],
+                                        pred_angle=base_joint_pred_angles[0].item()
                                     )
 
                     print(f"Validation: {total_img_count} images processed.")
-                    print(f"x_error_pixel_total: {x_error_pixel_total}, y_error_pixel_total: {y_error_pixel_total}")
-                    mean_ae_j3_val = angular_error_j3_total / len(dataloader_val.dataset)
-                    mean_x_error_pixel_val = x_error_pixel_total / len(dataloader_val.dataset)
-                    mean_y_error_pixel_val = y_error_pixel_total / len(dataloader_val.dataset)
+                    print(f"x_error_bin_total: {x_error_bin_total}, y_error_pixel_total: {y_error_bin_total}")
+                    mean_ae_base_joint_val = angular_error_base_joint_total / len(dataloader_val.dataset)
+                    mean_x_error_bin_val = x_error_bin_total / len(dataloader_val.dataset)
+                    mean_y_error_bin_val = y_error_bin_total / len(dataloader_val.dataset)
 
-                print(f"[Epoch {epoch+1}/{config.epochs}] Loss: {epoch_loss:.4f} | J3 AE: {mean_ae_j3_train:.4f}")
+                print(f"[Epoch {epoch+1}/{config.epochs}] Loss: {epoch_loss:.4f} | base_joint AE: {mean_ae_base_joint_val:.4f}")
                 current_lr = optimizer.param_groups[0]['lr']
                 wandb.log({
                     "epoch": epoch + 1,
                     "learning_rate": current_lr,
                     "label_smoothing": current_label_smoothing,
-                    "train_angular_error_joint3": mean_ae_j3_train,
-                    "train_x_error_pixel": mean_x_error_pixel_train,
-                    "train_y_error_pixel": mean_y_error_pixel_train,
+                    "train_angular_error_joint3": mean_ae_base_joint_train,
+                    "train_x_error_pixel": mean_x_error_bin_train,
+                    "train_y_error_pixel": mean_y_error_bin_train,
                     "loss": epoch_loss,
                     "loss_joints": running_loss_joints,
                     "loss_pixel": running_loss_pixel,
-                    "val_angular_error_joint3": mean_ae_j3_val,
-                    "val_x_error_pixel": mean_x_error_pixel_val,
-                    "val_y_error_pixel": mean_y_error_pixel_val
+                    "val_angular_error_joint3": mean_ae_base_joint_val,
+                    "val_x_error_pixel": mean_x_error_bin_val,
+                    "val_y_error_pixel": mean_y_error_bin_val
                 })
 
                 # Reduce label smoothing
@@ -543,6 +511,7 @@ if __name__ == "__main__":
         wandb.login(key=api_key)
         print("Logged into wandb successfully.")
     else:
-        print("WANDB_API_KEY or secret file not found. Skipping wandb login.")
+        print("Could not login to wandb. Exiting.")
+        raise SystemExit(1)
     sweep_id = wandb.sweep(sweep_config, project="EndEffectorPosePred")
     wandb.agent(sweep_id, train, count=40)

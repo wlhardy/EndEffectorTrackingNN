@@ -37,7 +37,7 @@ def load_image_as_tensor(image_path, rotate=False):
 
 # MLP Head Module
 class EndEffectorPosePredToken(nn.Module):
-    def __init__(self, backbone, num_classes, nbr_tokens=1):
+    def __init__(self, backbone, num_classes_joint, nbr_classes_xy, nbr_tokens=1):
         super().__init__()
         self.backbone = backbone
         self.patch_size = backbone.patch_size
@@ -52,37 +52,14 @@ class EndEffectorPosePredToken(nn.Module):
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.normal_(self.learnable_tokens, std=1e-6)
 
-        self.j3_head = nn.Linear(embed_dim, num_classes // 2)
-
-        """
-        self.j1_head = nn.Linear(embed_dim, num_classes)
-        self.j2_head = nn.Linear(embed_dim, num_classes)
-        self.j4_head = nn.Linear(embed_dim, num_classes)
-        """
-        self.base_x_head = nn.Sequential(
-            nn.Linear(embed_dim, 1),
-            nn.Sigmoid())
-        self.base_y_head = nn.Sequential(
-            nn.Linear(embed_dim, 1),
-            nn.Sigmoid())
-        """
-        self.left_claw_x_head = nn.Sequential(
-            nn.Linear(embed_dim, 1),
-            nn.Sigmoid())
-        self.left_claw_y_head = nn.Sequential(
-            nn.Linear(embed_dim, 1),
-            nn.Sigmoid())
-        self.right_claw_x_head = nn.Sequential(
-            nn.Linear(embed_dim, 1),
-            nn.Sigmoid())
-        self.right_claw_y_head = nn.Sequential(
-            nn.Linear(embed_dim, 1),
-            nn.Sigmoid())
-        """
+        self.base_joint_head = nn.Linear(embed_dim, num_classes_joint // 2)
+        self.base_x_head = nn.Linear(embed_dim, nbr_classes_xy)
+        self.base_y_head = nn.Linear(embed_dim, nbr_classes_xy)
         
         self.norm = backbone.norm
 
     def interpolate_pos_encoding(self, x, w, h):
+        # Taken and adapted from DINO:
         previous_dtype = x.dtype
         npatch = x.shape[1] - self.nbr_tokens
         N = self.backbone.pos_embed.shape[1] - 1
@@ -125,13 +102,13 @@ class EndEffectorPosePredToken(nn.Module):
         for blk in self.backbone.blocks:
             x = blk(x)
         x = self.norm(x)
-        j3_task_token_out = x[:, :self.nbr_tokens]
-        j3_token_mean = j3_task_token_out.mean(dim=1)
-        j3_logits = self.j3_head(j3_token_mean)
+        base_joint_task_token_out = x[:, :self.nbr_tokens]
+        base_joint_token_mean = base_joint_task_token_out.mean(dim=1)
+        base_joint_logits = self.base_joint_head(base_joint_token_mean)
         base_x_token_out = x[:, self.nbr_tokens:2*self.nbr_tokens]
         base_x_token_mean = base_x_token_out.mean(dim=1)
-        base_x = self.base_x_head(base_x_token_mean)
+        base_x_logits = self.base_x_head(base_x_token_mean)
         base_y_token_out = x[:, 2*self.nbr_tokens:3*self.nbr_tokens]
         base_y_token_mean = base_y_token_out.mean(dim=1)
-        base_y = self.base_y_head(base_y_token_mean)
-        return j3_logits, base_x, base_y
+        base_y_logits = self.base_y_head(base_y_token_mean)
+        return base_joint_logits, base_x_logits, base_y_logits

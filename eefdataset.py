@@ -42,7 +42,7 @@ def class_to_angle(class_idx, precision, symmetric=False, center=False):
 
 class EEFDataset(Dataset):
     def __init__(self, image_dirs, joint_csv_paths, xy_csv_paths=None,
-                 joint_precision=1, transform=None, cache_dir=".cache"):
+                 joint_precision=1, xy_bin_nbr=100, transform=None, cache_dir=".cache"):
 
         if isinstance(image_dirs, str):
             image_dirs = [image_dirs]
@@ -56,6 +56,7 @@ class EEFDataset(Dataset):
         self.image_dirs = image_dirs
         self.joint_precision = joint_precision
         self.transform = transform
+        self.xy_bin_nbr = xy_bin_nbr
 
         closest_time_threshold = 5e+7
         time_interval = 6e+10
@@ -65,7 +66,8 @@ class EEFDataset(Dataset):
             "image_dirs": sorted(image_dirs),
             "joint_csv_paths": sorted(joint_csv_paths),
             "xy_csv_paths": sorted(xy_csv_paths),
-            "joint_precision": joint_precision,
+            "joint_precision": self.joint_precision,
+            "xy_bin_nbr": self.xy_bin_nbr,
             "closest_time_threshold": closest_time_threshold,
             "time_interval": time_interval
         }
@@ -151,6 +153,9 @@ class EEFDataset(Dataset):
                         else:
                             closest_joint_values['x'] = 0
                             closest_joint_values['y'] = 0
+                        # Precompute and store quantized values for base_joint
+                        closest_joint_values['base_joint_quant'] = quantize_joint(
+                            float(closest_joint_values['base_joint']), joint_precision, symmetric=True)
 
                         self.data.append((img_path, closest_joint_values))
 
@@ -170,18 +175,13 @@ class EEFDataset(Dataset):
 
         image = Image.open(img_path).convert("RGB")
         orig_w, orig_h = image.size
-        x_norm = joint_values['x'] / orig_w
-        y_norm = joint_values['y'] / orig_h
+        x_bin = int(joint_values['x'] / orig_w * self.xy_bin_nbr)
+        y_bin = int(joint_values['y'] / orig_h * self.xy_bin_nbr)
         if self.transform:
             image = self.transform(image)
-        if isinstance(image, torch.Tensor):
-            _, new_h, new_w = image.shape
-        else:
-            new_w, new_h = image.size
-        x_transf = x_norm * new_w
-        y_transf = y_norm * new_h
-        joint_values['x'] = x_transf
-        joint_values['y'] = y_transf
+
+        joint_values['x'] = x_bin
+        joint_values['y'] = y_bin
         return image, joint_values
 
     def save_to_csv(self, save_path):
