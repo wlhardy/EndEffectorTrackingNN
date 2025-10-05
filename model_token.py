@@ -35,7 +35,7 @@ def load_image_as_tensor(image_path, rotate=False):
     ])
     return transform(image).unsqueeze(0)  # [B, C, H, W]
 
-# MLP Head Module
+
 class EndEffectorPosePredToken(nn.Module):
     def __init__(self, backbone, num_classes_joint, nbr_classes_xy, nbr_tokens=3):
         super().__init__()
@@ -45,6 +45,7 @@ class EndEffectorPosePredToken(nn.Module):
         self.nbr_tokens = nbr_tokens
         
         self.learnable_tokens = nn.Parameter(torch.randn(1, self.nbr_tokens, embed_dim))
+        self.learnable_tokens_pos_embed = self.backbone.pos_embed
 
         self.class_pos_embed = nn.Parameter(
             torch.zeros(1, self.nbr_tokens, embed_dim)
@@ -66,8 +67,8 @@ class EndEffectorPosePredToken(nn.Module):
         if npatch == N and w == h:
             return self.backbone.pos_embed
         pos_embed = self.backbone.pos_embed.float()
-        class_pos_embed = x[:, :self.nbr_tokens]
-        patch_pos_embed = x[:, self.nbr_tokens:]
+        class_pos_embed = pos_embed[:, 0]
+        patch_pos_embed = pos_embed[:, 1:]
         dim = x.shape[-1]
         w0 = w // self.patch_size
         h0 = h // self.patch_size
