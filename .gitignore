@@ -14,3 +14,4 @@
 *.sif
 /slurm_output
 /torch_models
+.vscode/launch.json

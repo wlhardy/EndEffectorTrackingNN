@@ -61,13 +61,13 @@ class EndEffectorPosePredToken(nn.Module):
     def interpolate_pos_encoding(self, x, w, h):
         # Taken and adapted from DINO:
         previous_dtype = x.dtype
-        npatch = x.shape[1] - 1
+        npatch = x.shape[1] - self.nbr_tokens
         N = self.backbone.pos_embed.shape[1] - 1
         if npatch == N and w == h:
             return self.backbone.pos_embed
         pos_embed = self.backbone.pos_embed.float()
-        class_pos_embed = self.class_pos_embed
-        patch_pos_embed = self.backbone.pos_embed[:, 1:]
+        class_pos_embed = x[:, :self.nbr_tokens]
+        patch_pos_embed = x[:, self.nbr_tokens:]
         dim = x.shape[-1]
         w0 = w // self.patch_size
         h0 = h // self.patch_size

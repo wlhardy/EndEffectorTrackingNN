@@ -15,4 +15,4 @@ trap 'rm -f "$temp_file"' EXIT
 echo "$WANDB_API_KEY" > "$temp_file"
 
 apptainer exec --nv --bind /datasets/eepp:/datasets --bind /etc/pki:/etc/pki --bind "$temp_file:/run/wandb_api_key.txt" ./scripts/train_token_dinov2_EEPP.sif bash \
-    -c "python3 train_token_x_y_rot.py --sweep norlab-ulaval/EndEffectorPosePred/jv8ivoaj"
+    -c "python3 train_token_x_y_rot.py --sweep norlab-ulaval/EndEffectorPosePred/n9x5nemz"

@@ -25,8 +25,8 @@ TARGET_BATCH_SIZE = [20]
 FREEZE_POS_EMBED = True
 FREEZE_PATCH_EMBED = True
 XY_BIN_NBR = 100
-MAIN_TRAIN_FOLDER = "/datasets/val"
-VAL_TRAIN_FOLDER = "/datasets/val"
+MAIN_TRAIN_FOLDER = "./datasets/val"
+VAL_TRAIN_FOLDER = "./datasets/val"
 
 sweep_config = {
     "method": "bayes",

@@ -464,4 +464,4 @@ if __name__ == "__main__":
         print("Could not login to wandb. Exiting.")
         raise SystemExit(1)
 
-    wandb.agent(sweep_id, train, count=40)
+    wandb.agent(sweep_id, train)
