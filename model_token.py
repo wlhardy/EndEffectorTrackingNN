@@ -37,7 +37,7 @@ def load_image_as_tensor(image_path, rotate=False):
 
 # MLP Head Module
 class EndEffectorPosePredToken(nn.Module):
-    def __init__(self, backbone, num_classes_joint, nbr_classes_xy, nbr_tokens=1):
+    def __init__(self, backbone, num_classes_joint, nbr_classes_xy, nbr_tokens=3):
         super().__init__()
         self.backbone = backbone
         self.patch_size = backbone.patch_size
@@ -46,10 +46,10 @@ class EndEffectorPosePredToken(nn.Module):
         
         self.learnable_tokens = nn.Parameter(torch.randn(1, self.nbr_tokens, embed_dim))
 
-        self.pos_embed = nn.Parameter(
+        self.class_pos_embed = nn.Parameter(
             torch.zeros(1, self.nbr_tokens, embed_dim)
         )
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.class_pos_embed, std=0.02)
         nn.init.normal_(self.learnable_tokens, std=1e-6)
 
         self.base_joint_head = nn.Linear(embed_dim, num_classes_joint // 2)
@@ -61,12 +61,12 @@ class EndEffectorPosePredToken(nn.Module):
     def interpolate_pos_encoding(self, x, w, h):
         # Taken and adapted from DINO:
         previous_dtype = x.dtype
-        npatch = x.shape[1] - self.nbr_tokens
+        npatch = x.shape[1] - 1
         N = self.backbone.pos_embed.shape[1] - 1
         if npatch == N and w == h:
-            return self.pos_embed
-        pos_embed = self.pos_embed.float()
-        class_pos_embed = pos_embed[:, 0:self.nbr_tokens]
+            return self.backbone.pos_embed
+        pos_embed = self.backbone.pos_embed.float()
+        class_pos_embed = self.class_pos_embed
         patch_pos_embed = self.backbone.pos_embed[:, 1:]
         dim = x.shape[-1]
         w0 = w // self.patch_size
@@ -102,13 +102,13 @@ class EndEffectorPosePredToken(nn.Module):
         for blk in self.backbone.blocks:
             x = blk(x)
         x = self.norm(x)
-        base_joint_task_token_out = x[:, :self.nbr_tokens]
+        base_joint_task_token_out = x[:, :1]
         base_joint_token_mean = base_joint_task_token_out.mean(dim=1)
         base_joint_logits = self.base_joint_head(base_joint_token_mean)
-        base_x_token_out = x[:, self.nbr_tokens:2*self.nbr_tokens]
+        base_x_token_out = x[:, 1:2]
         base_x_token_mean = base_x_token_out.mean(dim=1)
         base_x_logits = self.base_x_head(base_x_token_mean)
-        base_y_token_out = x[:, 2*self.nbr_tokens:3*self.nbr_tokens]
+        base_y_token_out = x[:, 2:3]
         base_y_token_mean = base_y_token_out.mean(dim=1)
         base_y_logits = self.base_y_head(base_y_token_mean)
         return base_joint_logits, base_x_logits, base_y_logits

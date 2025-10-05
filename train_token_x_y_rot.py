@@ -10,6 +10,7 @@ from collections import defaultdict
 from PIL import Image
 from pathlib import Path
 import os
+import argparse
 import wandb
 import math
 import random
@@ -24,68 +25,11 @@ import model_token
 
 matplotlib.use("Agg")
 
-MAIN_TRAIN_FOLDER = "./datasets/train"
-VAL_TRAIN_FOLDER = "./datasets/val"
-GT_PRECISION = 1 # Degrees that the GT will be rounded to (e.g. if set to 5, then a GT of 12 will be set to 10)
-EPOCHS = 40
-LEARNING_RATE = [1e-7, 1e-8]
-BACKBONE = 'dinov2_vitb14_reg'
-NUM_CLASSES = math.ceil(360 / GT_PRECISION)
-RANDOM_SEED = 42
-LABEL_SMOOTHING_MAX = 0.05
-LABEL_SMOOTHING_MIN = 0.0
-LR_DECAY_POWER = [0.9, 0.95, 0.99, 1.0]
-REDUCE_LABEL_SMOOTHING_MIN = 0.0
-REDUCE_LABEL_SMOOTHING_MAX = 0.05
-SAMPLES_PER_CLASS = 3
-LEFT_CROPPING = 398
-RIGHT_CROPPING = 856
-DEBUG = 1
+DEBUG = 0
 VERBOSE = 0
-WEIGHT_LOSS_JOINTS = 1.0
-WEIGHT_LOSS_XY = 1.0
-FREEZE_BLOCKS = [0, 2, 4, 6]  # Max number of blocks in the backbone is 11
-NBR_TOKEN_PER_TASK = [1]
-MAX_BATCH_SIZE = 2
-TARGET_BATCH_SIZE = [2]
-FREEZE_POS_EMBED = True
-FREEZE_PATCH_EMBED = True
+COMPUTE_ERROR_IN_TRAINING = False
 RUN_VALIDATION = True
-XY_BIN_NBR = 100
-COMPUTE_ERROR_IN_TRAINING = True
 
-sweep_config = {
-    "method": "random",
-    "metric": {"goal": "minimize", "name": "loss"},
-    "parameters": {
-        "model_type": {"value": "token"},
-        "max_batch_size": {"value": MAX_BATCH_SIZE},
-        "ground_truth_precision": {"value": GT_PRECISION},
-        "epochs": {"value": EPOCHS},
-        "random_seed": {"value": RANDOM_SEED},
-        "backbone": {"value": BACKBONE},
-        "num_classes": {"value": NUM_CLASSES},
-        "train_main_folder_path": {"value": MAIN_TRAIN_FOLDER},
-        "val_main_folder_path": {"value": VAL_TRAIN_FOLDER},
-        "learning_rate": {"values": LEARNING_RATE},
-        "label_smoothing": {"distribution": "uniform", "max": LABEL_SMOOTHING_MAX, "min": LABEL_SMOOTHING_MIN},
-        "lr_decay_power": {"values": LR_DECAY_POWER},
-        "reduce_label_smoothing": {"distribution": "uniform", "max": REDUCE_LABEL_SMOOTHING_MAX, "min": REDUCE_LABEL_SMOOTHING_MIN},
-        "samples_per_class": {"value": SAMPLES_PER_CLASS},
-        "left_cropping": {"value": LEFT_CROPPING},
-        "right_cropping": {"value": RIGHT_CROPPING},
-        "top_cropping": {"value": 1},
-        "bottom_cropping": {"value": 2},
-        "weight_loss_joints": {"value": WEIGHT_LOSS_JOINTS},
-        "weight_loss_xy": {"value": WEIGHT_LOSS_XY},
-        "target_batch_size": {"values": TARGET_BATCH_SIZE},
-        "freeze_blocks": {"values": FREEZE_BLOCKS},
-        "nbr_token_per_task": {"values": NBR_TOKEN_PER_TASK},
-        "freeze_pos_embed": {"value": FREEZE_POS_EMBED},
-        "freeze_patch_embed": {"value": FREEZE_PATCH_EMBED},
-        "xy_bin_nbr": {"value": XY_BIN_NBR}
-    },
-}
 
 def save_debug_image(image_tensor, joint_values, save_path,
                      pred_x=None, pred_y=None, pred_angle=None,
@@ -255,7 +199,7 @@ def train(config=None):
             xy_bin_nbr = config.xy_bin_nbr
 
             # Load model
-            ee_model = model_token.EndEffectorPosePredToken(backbone_model, num_classes_joint=config.num_classes, nbr_classes_xy=xy_bin_nbr, nbr_tokens=config.nbr_token_per_task).to(device)
+            ee_model = model_token.EndEffectorPosePredToken(backbone_model, num_classes_joint=config.num_classes, nbr_classes_xy=xy_bin_nbr).to(device)
             optimizer = torch.optim.AdamW(ee_model.parameters(), lr=config.learning_rate)
             
             scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer,
@@ -279,8 +223,8 @@ def train(config=None):
             accumulation_steps = max(1, target_batch_size // batch_size)
 
             cpu_count = multiprocessing.cpu_count()
-            train_cpu_count = min(16, cpu_count)  # Limit to 8 workers to avoid overloading the system
-            val_cpu_count = min(8, cpu_count)  # Validation can be lighter
+            train_cpu_count = min(16, cpu_count)
+            val_cpu_count = min(16, cpu_count)
             dataloader_train = DataLoader(dataset_train, batch_size=batch_size, num_workers=train_cpu_count, shuffle=True, persistent_workers=True)
 
             if RUN_VALIDATION:
@@ -492,13 +436,19 @@ def train(config=None):
                     'loss': epoch_loss,
                     'dinov2_model': config.backbone,
                     'num_classes': config.num_classes,
-                    'num_token_per_class' : config.nbr_token_per_task,
                 }, checkpoint_path)
     finally:
         torch.multiprocessing.set_sharing_strategy("file_system")
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Train EndEffectorPosePrediction Model with Token-based Architecture")
+    parser.add_argument("--sweep", type=str, help="Sweep ID to use for hyperparameter optimization", required=True)
+    args = parser.parse_args()
+    sweep_id = args.sweep
+    print(sweep_id)
+
     api_key = os.environ.get("WANDB_API_KEY")
     if not api_key:
         try:
@@ -513,5 +463,5 @@ if __name__ == "__main__":
     else:
         print("Could not login to wandb. Exiting.")
         raise SystemExit(1)
-    sweep_id = wandb.sweep(sweep_config, project="EndEffectorPosePred")
+
     wandb.agent(sweep_id, train, count=40)
