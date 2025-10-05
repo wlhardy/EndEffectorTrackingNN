@@ -45,13 +45,17 @@ class EndEffectorPosePredToken(nn.Module):
         self.nbr_tokens = nbr_tokens
         
         self.learnable_tokens = nn.Parameter(torch.randn(1, self.nbr_tokens, embed_dim))
-        self.learnable_tokens_pos_embed = self.backbone.pos_embed
+        #self.learnable_tokens_pos_embed = self.backbone.pos_embed[:, 0, :].unsqueeze(1).repeat(1, self.nbr_tokens, 1)
 
         self.class_pos_embed = nn.Parameter(
             torch.zeros(1, self.nbr_tokens, embed_dim)
         )
         nn.init.trunc_normal_(self.class_pos_embed, std=0.02)
         nn.init.normal_(self.learnable_tokens, std=1e-6)
+
+        original_patch_pos_embed = self.backbone.pos_embed[:, 1:, :]
+        new_pos_embed = torch.cat([self.class_pos_embed.expand(original_patch_pos_embed.size(0), -1, -1), original_patch_pos_embed], dim=1)
+        self.backbone.pos_embed = nn.Parameter(new_pos_embed)
 
         self.base_joint_head = nn.Linear(embed_dim, num_classes_joint // 2)
         self.base_x_head = nn.Linear(embed_dim, nbr_classes_xy)
@@ -63,12 +67,12 @@ class EndEffectorPosePredToken(nn.Module):
         # Taken and adapted from DINO:
         previous_dtype = x.dtype
         npatch = x.shape[1] - self.nbr_tokens
-        N = self.backbone.pos_embed.shape[1] - 1
+        N = self.backbone.pos_embed.shape[1] - self.nbr_tokens
         if npatch == N and w == h:
             return self.backbone.pos_embed
         pos_embed = self.backbone.pos_embed.float()
-        class_pos_embed = pos_embed[:, 0]
-        patch_pos_embed = pos_embed[:, 1:]
+        class_pos_embed = pos_embed[:, :self.nbr_tokens]
+        patch_pos_embed = pos_embed[:, self.nbr_tokens:]
         dim = x.shape[-1]
         w0 = w // self.patch_size
         h0 = h // self.patch_size
@@ -92,7 +96,7 @@ class EndEffectorPosePredToken(nn.Module):
         )
         assert (w0, h0) == patch_pos_embed.shape[-2:]
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
-        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1).to(previous_dtype)
+        return torch.cat((class_pos_embed, patch_pos_embed), dim=1).to(previous_dtype)
 
     def forward(self, x):
         B, C, W, H = x.shape
