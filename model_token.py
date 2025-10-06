@@ -108,12 +108,9 @@ class EndEffectorPosePredToken(nn.Module):
             x = blk(x)
         x = self.norm(x)
         base_joint_task_token_out = x[:, :1]
-        base_joint_token_mean = base_joint_task_token_out.mean(dim=1)
-        base_joint_logits = self.base_joint_head(base_joint_token_mean)
+        base_joint_logits = self.base_joint_head(base_joint_task_token_out)
         base_x_token_out = x[:, 1:2]
-        base_x_token_mean = base_x_token_out.mean(dim=1)
-        base_x_logits = self.base_x_head(base_x_token_mean)
+        base_x_logits = self.base_x_head(base_x_token_out)
         base_y_token_out = x[:, 2:3]
-        base_y_token_mean = base_y_token_out.mean(dim=1)
-        base_y_logits = self.base_y_head(base_y_token_mean)
+        base_y_logits = self.base_y_head(base_y_token_out)
         return base_joint_logits, base_x_logits, base_y_logits
