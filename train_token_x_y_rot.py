@@ -27,7 +27,7 @@ matplotlib.use("Agg")
 
 DEBUG = 0
 VERBOSE = 0
-COMPUTE_ERROR_IN_TRAINING = False
+COMPUTE_ERROR_IN_TRAINING = True
 RUN_VALIDATION = True
 
 
@@ -222,6 +222,9 @@ def train(config=None):
             batch_size = min(config.max_batch_size, target_batch_size)
             accumulation_steps = max(1, target_batch_size // batch_size)
 
+            weight_loss_joints = config.weight_ratio_joints
+            weight_loss_xy = 1.0 - weight_loss_joints
+
             cpu_count = multiprocessing.cpu_count()
             train_cpu_count = min(16, cpu_count)
             val_cpu_count = min(16, cpu_count)
@@ -239,6 +242,7 @@ def train(config=None):
                 angular_error_base_joint_total = 0
                 x_error_bin_total = 0
                 y_error_bin_total = 0
+                train_average_error = 0
 
                 for i, (images, joint_values) in enumerate(tqdm.tqdm(dataloader_train, desc=f"Epoch {epoch+1}/{config.epochs}")):
                     # Start a timer to measure the training step duration
@@ -266,7 +270,7 @@ def train(config=None):
                     loss_joints = criterion_joints(base_joint_logits, base_joint_quant)
                     loss_pixel = criterion_pixel(base_x_logits, base_x) + criterion_pixel(base_y_logits, base_y)
                     
-                    loss = (loss_joints * config.weight_loss_joints) + (loss_pixel * config.weight_loss_xy)
+                    loss = (loss_joints * weight_loss_joints) + (loss_pixel * weight_loss_xy)
                     running_loss += loss.item()
                     running_loss_joints += loss_joints.item()
                     running_loss_pixel += loss_pixel.item()
@@ -335,6 +339,7 @@ def train(config=None):
                 mean_ae_base_joint_train = angular_error_base_joint_total / img_total
                 mean_x_error_bin_train = x_error_bin_total / img_total
                 mean_y_error_bin_train = y_error_bin_total / img_total
+                train_average_error = ((mean_ae_base_joint_train / config.num_classes) + (mean_x_error_bin_train / xy_bin_nbr) + (mean_y_error_bin_train / xy_bin_nbr)) / 3.0
 
                 scheduler.step()
 
@@ -417,7 +422,8 @@ def train(config=None):
                     "loss_pixel": running_loss_pixel,
                     "val_angular_error_joint3": mean_ae_base_joint_val,
                     "val_x_error_pixel": mean_x_error_bin_val,
-                    "val_y_error_pixel": mean_y_error_bin_val
+                    "val_y_error_pixel": mean_y_error_bin_val,
+                    "train_average_error": train_average_error
                 })
 
                 # Reduce label smoothing

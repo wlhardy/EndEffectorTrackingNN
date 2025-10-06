@@ -45,16 +45,12 @@ class EndEffectorPosePredToken(nn.Module):
         self.nbr_tokens = nbr_tokens
         
         self.learnable_tokens = nn.Parameter(torch.randn(1, self.nbr_tokens, embed_dim))
-        #self.learnable_tokens_pos_embed = self.backbone.pos_embed[:, 0, :].unsqueeze(1).repeat(1, self.nbr_tokens, 1)
+        self.learnable_tokens_pos_embed = self.backbone.pos_embed[:, 0, :].unsqueeze(1).repeat(1, self.nbr_tokens, 1)
 
-        self.class_pos_embed = nn.Parameter(
-            torch.zeros(1, self.nbr_tokens, embed_dim)
-        )
-        nn.init.trunc_normal_(self.class_pos_embed, std=0.02)
         nn.init.normal_(self.learnable_tokens, std=1e-6)
 
         original_patch_pos_embed = self.backbone.pos_embed[:, 1:, :]
-        new_pos_embed = torch.cat([self.class_pos_embed.expand(original_patch_pos_embed.size(0), -1, -1), original_patch_pos_embed], dim=1)
+        new_pos_embed = torch.cat([self.learnable_tokens_pos_embed, original_patch_pos_embed], dim=1)
         self.backbone.pos_embed = nn.Parameter(new_pos_embed)
 
         self.base_joint_head = nn.Linear(embed_dim, num_classes_joint // 2)
@@ -107,10 +103,10 @@ class EndEffectorPosePredToken(nn.Module):
         for blk in self.backbone.blocks:
             x = blk(x)
         x = self.norm(x)
-        base_joint_task_token_out = x[:, :1]
-        base_joint_logits = self.base_joint_head(base_joint_task_token_out)
-        base_x_token_out = x[:, 1:2]
-        base_x_logits = self.base_x_head(base_x_token_out)
-        base_y_token_out = x[:, 2:3]
-        base_y_logits = self.base_y_head(base_y_token_out)
+        base_joint_task_token_out = x[:, :1, :]
+        base_joint_logits = self.base_joint_head(base_joint_task_token_out).squeeze(1)
+        base_x_token_out = x[:, 1:2, :]
+        base_x_logits = self.base_x_head(base_x_token_out).squeeze(1)
+        base_y_token_out = x[:, 2:3, :]
+        base_y_logits = self.base_y_head(base_y_token_out).squeeze(1)
         return base_joint_logits, base_x_logits, base_y_logits

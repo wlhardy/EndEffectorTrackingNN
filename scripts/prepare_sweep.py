@@ -17,11 +17,9 @@ REDUCE_LABEL_SMOOTHING_MAX = 0.05
 SAMPLES_PER_CLASS = 3
 LEFT_CROPPING = 398
 RIGHT_CROPPING = 856
-WEIGHT_LOSS_JOINTS = 1.0
-WEIGHT_LOSS_XY = 1.0
 FREEZE_BLOCKS = [0, 2, 4, 6]  # Max number of blocks in the backbone is 11
-MAX_BATCH_SIZE = 20
-TARGET_BATCH_SIZE = [20]
+MAX_BATCH_SIZE = 4
+TARGET_BATCH_SIZE = [4]
 FREEZE_POS_EMBED = True
 FREEZE_PATCH_EMBED = True
 XY_BIN_NBR = 100
@@ -30,11 +28,11 @@ VAL_TRAIN_FOLDER = "./datasets/val"
 
 sweep_config = {
     "method": "bayes",
-    "metric": {"goal": "minimize", "name": "loss"},
+    "metric": {"goal": "minimize", "name": "train_average_error"},
     "early_terminate": {
         "eta": 5,
-        "max_iter": 40,
-        "s": 2,
+        "max_iter": 60,
+        "s": 4,
         "type": "hyperband",
     },
     "parameters": {
@@ -56,8 +54,7 @@ sweep_config = {
         "right_cropping": {"value": RIGHT_CROPPING},
         "top_cropping": {"value": 1},
         "bottom_cropping": {"value": 2},
-        "weight_loss_joints": {"value": WEIGHT_LOSS_JOINTS},
-        "weight_loss_xy": {"value": WEIGHT_LOSS_XY},
+        "weight_ratio_joints": {"distribution": "uniform", "max": 1.0, "min": 0.0},
         "target_batch_size": {"values": TARGET_BATCH_SIZE},
         "freeze_blocks": {"values": FREEZE_BLOCKS},
         "freeze_pos_embed": {"value": FREEZE_POS_EMBED},
