@@ -26,6 +26,7 @@ def center_pad_to_multiple(x, multiple):
     x_padded = TF.pad(x, [pad_left, pad_top, pad_right, pad_bottom])
     return x_padded
 
+
 def load_image_as_tensor(image_path, rotate=False):
     image = Image.open(image_path).convert("RGB")
     if rotate:

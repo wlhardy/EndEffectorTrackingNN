@@ -12,7 +12,7 @@ import csv
 import heapq
 
 import eefdataset
-import model_token
+import model_token_dinov2
 from train_token_x_y_rot import save_debug_image, half_pixels_resize_and_pad, discover_dataset_folders
 
 
@@ -27,7 +27,7 @@ def run_inference(args):
 
     # === Load model ===
     backbone = torch.hub.load('facebookresearch/dinov2', ckpt['dinov2_model'], force_reload=False)
-    ee_model = model_token.EndEffectorPosePredToken(backbone,
+    ee_model = model_token_dinov2.EndEffectorPosePredToken(backbone,
                                                     num_classes_joint=ckpt['num_classes'],
                                                     nbr_classes_xy=100).to(device)
     ee_model.load_state_dict(ckpt['model_state_dict'])

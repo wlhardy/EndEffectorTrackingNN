@@ -20,10 +20,10 @@ RIGHT_CROPPING = 856
 FREEZE_BLOCKS = [0, 2, 4, 6]  # Max number of blocks in the backbone is 11
 MAX_BATCH_SIZE = 4
 TARGET_BATCH_SIZE = [4]
-FREEZE_POS_EMBED = True
-FREEZE_PATCH_EMBED = True
+FREEZE_POS_EMBED = False
+FREEZE_PATCH_EMBED = False
 XY_BIN_NBR = 100
-MAIN_TRAIN_FOLDER = "./datasets/val"
+MAIN_TRAIN_FOLDER = "./datasets/train"
 VAL_TRAIN_FOLDER = "./datasets/val"
 
 sweep_config = {

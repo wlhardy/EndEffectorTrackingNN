@@ -21,7 +21,7 @@ import time
 from torch.utils.data import DataLoader, SubsetRandomSampler
 
 import eefdataset
-import model_token_dinov2
+import model_token_dinov3
 
 matplotlib.use("Agg")
 
@@ -29,7 +29,7 @@ DEBUG = 0
 VERBOSE = 0
 COMPUTE_ERROR_IN_TRAINING = True
 RUN_VALIDATION = True
-
+DINOV3_REPO_DIR = "dinov3"
 
 def save_debug_image(image_tensor, joint_values, save_path,
                      pred_x=None, pred_y=None, pred_angle=None,
@@ -177,8 +177,8 @@ def train(config=None):
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             print(f"Using device: {device}")
 
-            # Load DINOv2
-            backbone_model = torch.hub.load('facebookresearch/dinov2', config['backbone'], force_reload=False)
+            # Load DINOv3
+            backbone_model = torch.hub.load(DINOV3_REPO_DIR, 'dinov3_vitb16', source='local', weights="dinov3/checkpoints/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth", force_reload=False)
             for param in backbone_model.parameters():
                 param.requires_grad = True
 
@@ -187,10 +187,6 @@ def train(config=None):
                 if i < num_blocks_to_freeze:
                     for param in block.parameters():
                         param.requires_grad = False
-            
-            if config.freeze_pos_embed:
-                print("Freezing position embedding.")
-                backbone_model.pos_embed.requires_grad = False
 
             if config.freeze_patch_embed:
                 print("Freezing patch embedding.")
@@ -199,7 +195,7 @@ def train(config=None):
             xy_bin_nbr = config.xy_bin_nbr
 
             # Load model
-            ee_model = model_token_dinov2.EndEffectorPosePredToken(backbone_model, num_classes_joint=config.num_classes, nbr_classes_xy=xy_bin_nbr).to(device)
+            ee_model = model_token_dinov3.EndEffectorPosePredToken(backbone_model, num_classes_joint=config.num_classes, nbr_classes_xy=xy_bin_nbr).to(device)
             optimizer = torch.optim.AdamW(ee_model.parameters(), lr=config.learning_rate)
             
             scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer,

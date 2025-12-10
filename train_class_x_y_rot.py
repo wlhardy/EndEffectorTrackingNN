@@ -21,7 +21,7 @@ import time
 from torch.utils.data import DataLoader, SubsetRandomSampler
 
 import eefdataset
-import model_class
+import model_class_dinov2
 
 matplotlib.use("Agg")
 
@@ -199,7 +199,7 @@ def train(config=None):
             xy_bin_nbr = config.xy_bin_nbr
 
             # Load model
-            ee_model = model_class.EndEffectorPosePredClass(backbone_model, num_classes_joint=config.num_classes, nbr_classes_xy=xy_bin_nbr).to(device)
+            ee_model = model_class_dinov2.EndEffectorPosePredClass(backbone_model, num_classes_joint=config.num_classes, nbr_classes_xy=xy_bin_nbr).to(device)
             optimizer = torch.optim.AdamW(ee_model.parameters(), lr=config.learning_rate)
             
             scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer,

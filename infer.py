@@ -4,7 +4,7 @@ import torchvision.transforms.functional as TF
 import math
 
 import eefdataset
-import model_token
+import model_token_dinov2
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import PIL.Image as Image
@@ -23,13 +23,13 @@ DEBUG = False
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-torch.serialization.add_safe_globals([model_token.EndEffectorPosePredToken])
+torch.serialization.add_safe_globals([model_token_dinov2.EndEffectorPosePredToken])
 
 # Load the model
 def load_model(model_path):
     checkpoint = torch.load(model_path)
     backbone_model = torch.hub.load('facebookresearch/dinov2', checkpoint['dinov2_model']).to(device)
-    ee_model = model_token.EndEffectorPosePredToken(backbone_model, num_classes=checkpoint['num_classes'], nbr_tokens=4).to(device)
+    ee_model = model_token_dinov2.EndEffectorPosePredToken(backbone_model, num_classes=checkpoint['num_classes'], nbr_tokens=4).to(device)
     ee_model.load_state_dict(checkpoint['model_state_dict'])
     ee_model.eval()
     return ee_model
