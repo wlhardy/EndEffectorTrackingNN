@@ -31,6 +31,12 @@ COMPUTE_ERROR_IN_TRAINING = True
 RUN_VALIDATION = True
 DINOV3_REPO_DIR = "dinov3"
 
+DINO_CHECKPOINT_DICT = {
+    'dinov3_vitb16': 'dinov3/checkpoints/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth',
+    'dinov3_vitl16': 'dinov3/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth',
+    'dinov3_vits16': 'dinov3/checkpoints/dinov3_vits16_pretrain_lvd1689m-08c60483.pth',
+}
+
 def save_debug_image(image_tensor, joint_values, save_path,
                      pred_x=None, pred_y=None, pred_angle=None,
                      nbr_bins_xy=100):
