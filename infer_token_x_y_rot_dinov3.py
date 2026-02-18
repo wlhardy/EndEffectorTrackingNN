@@ -15,6 +15,7 @@ import eefdataset
 import model_token_dinov2
 from train_token_x_y_rot import save_debug_image, half_pixels_resize_and_pad, discover_dataset_folders
 
+DINOV3_REPO_DIR = "dinov3"
 
 @torch.no_grad()
 def run_inference(args):
@@ -26,8 +27,8 @@ def run_inference(args):
     print(f"Loaded checkpoint from {args.checkpoint}")
 
     # === Load model ===
-    backbone = torch.hub.load('facebookresearch/dinov2', ckpt['dinov2_model'], force_reload=False)
-    ee_model = model_token_dinov2.EndEffectorPosePredToken(backbone,
+    backbone_model = torch.hub.load(DINOV3_REPO_DIR, 'dinov3_vitb16', source='local', weights="dinov3/checkpoints/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth", force_reload=False)
+    ee_model = model_token_dinov2.EndEffectorPosePredToken(backbone_model,
                                                     num_classes_joint=ckpt['num_classes'],
                                                     nbr_classes_xy=100).to(device)
     ee_model.load_state_dict(ckpt['model_state_dict'])
@@ -52,6 +53,8 @@ def run_inference(args):
     os.makedirs(args.output_dir, exist_ok=True)
     worst_dir = Path(args.output_dir) / "worst_predictions"
     worst_dir.mkdir(exist_ok=True, parents=True)
+    best_dir = Path(args.output_dir) / "best_predictions"
+    best_dir.mkdir(exist_ok=True, parents=True)
     csv_path = Path(args.output_dir) / "results.csv"
 
     # === CSV header ===
@@ -64,6 +67,8 @@ def run_inference(args):
     # === Keep top-N worst errors using a min-heap ===
     worst_heap = []  # (total_error, sample_index)
     heapq.heapify(worst_heap)
+    best_heap = []  # (total_error, sample_index)
+    heapq.heapify(best_heap)
 
     print("Running inference ...")
     for batch_i, (images, joint_values) in enumerate(tqdm(dataloader)):
@@ -106,23 +111,31 @@ def run_inference(args):
                     base_y_preds[j].item()
                 ])
 
-                # Track top-N worst errors
+                sample_idx = global_idx
                 err_val = total_error[j].item()
+
+                # Worst N (largest)
                 if len(worst_heap) < args.top_n:
-                    heapq.heappush(worst_heap, (err_val, global_idx))
-                else:
-                    heapq.heappushpop(worst_heap, (err_val, global_idx))
+                    heapq.heappush(worst_heap, (err_val, sample_idx))
+                elif err_val > worst_heap[0][0]:
+                    heapq.heapreplace(worst_heap, (err_val, sample_idx))
+
+                # Best N (smallest) using max-heap via negative error
+                if len(best_heap) < args.top_n:
+                    heapq.heappush(best_heap, (-err_val, sample_idx))
+                elif err_val < -best_heap[0][0]:
+                    heapq.heapreplace(best_heap, (-err_val, sample_idx))
 
         # Free batch memory
         del images, base_joint_logits, base_x_logits, base_y_logits
         torch.cuda.empty_cache()
 
     # === Sort heap descending (worst first) ===
-    worst_heap.sort(key=lambda x: x[0], reverse=True)
+    worst_heap = sorted(worst_heap, key=lambda x: x[0], reverse=True)
 
     print(f"Saving {len(worst_heap)} worst predictions ...")
     for rank, (err_val, sample_idx) in enumerate(worst_heap):
-        img, gt = dataset[sample_idx]  # reload from dataset
+        img, gt = dataset[sample_idx]  # reload from dataset (so the cropped version is used) #TODO Validate that we show the GT properly
         img_tensor = img.to(device).unsqueeze(0)
         base_joint_logits, base_x_logits, base_y_logits = ee_model(img_tensor)
         pred_angle = eefdataset.class_to_angle(base_joint_logits.argmax(dim=1),
@@ -133,6 +146,27 @@ def run_inference(args):
             img,
             gt,
             worst_dir / f"worst_{rank:03d}_idx{sample_idx}_err{err_val:.2f}.png",
+            pred_x=pred_x / args.xy_bin_nbr * img.shape[2],
+            pred_y=pred_y / args.xy_bin_nbr * img.shape[1],
+            pred_angle=pred_angle
+        )
+
+    # === Sort heap descending (best first) ===
+    best_heap  = sorted([(-e, i) for (e, i) in best_heap], key=lambda x: x[0])
+    
+    print(f"Saving {len(best_heap)} best predictions ...")
+    for rank, (err_val, sample_idx) in enumerate(best_heap):
+        img, gt = dataset[sample_idx]  # reload from dataset (so the cropped version is used) #TODO Validate that we show the GT properly
+        img_tensor = img.to(device).unsqueeze(0)
+        base_joint_logits, base_x_logits, base_y_logits = ee_model(img_tensor)
+        pred_angle = eefdataset.class_to_angle(base_joint_logits.argmax(dim=1),
+                                            args.precision, symmetric=True)[0].item()
+        pred_x = base_x_logits.argmax(dim=1)[0].item()
+        pred_y = base_y_logits.argmax(dim=1)[0].item()
+        save_debug_image(
+            img,
+            gt,
+            best_dir / f"best_{rank:03d}_idx{sample_idx}_err{err_val:.2f}.png",
             pred_x=pred_x / args.xy_bin_nbr * img.shape[2],
             pred_y=pred_y / args.xy_bin_nbr * img.shape[1],
             pred_angle=pred_angle

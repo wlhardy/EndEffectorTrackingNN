@@ -9,6 +9,7 @@ import numpy as np
 from collections import defaultdict
 from PIL import Image
 from pathlib import Path
+import sys
 import os
 import argparse
 import wandb
@@ -20,8 +21,11 @@ import multiprocessing
 import time
 from torch.utils.data import DataLoader, SubsetRandomSampler
 
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
+
 import eefdataset
-import model_token_dinov2
+import model_token_dinov3_reg_u_l_b
 
 matplotlib.use("Agg")
 
@@ -29,11 +33,23 @@ DEBUG = 0
 VERBOSE = 0
 COMPUTE_ERROR_IN_TRAINING = True
 RUN_VALIDATION = True
+DINOV3_REPO_DIR = "dinov3"
 
+DINO_CHECKPOINT_DICT = {
+    'dinov3_vitb16': 'dinov3/checkpoints/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth',
+    'dinov3_vitl16': 'dinov3/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth',
+    'dinov3_vits16': 'dinov3/checkpoints/dinov3_vits16_pretrain_lvd1689m-08c60483.pth',
+}
 
-def gt_to_sym_0_180(angle_deg: float) -> float:
-    # 180° periodic symmetry: angles equivalent mod 180
-    return float(angle_deg) % 180.0  # in [0,180)
+def normalize_2d(v, eps=1e-8):
+    return v / (v.norm(dim=1, keepdim=True) + eps)
+
+def ang_error_deg_period360(pred_deg, gt_deg):
+    # both in degrees, return minimal error under 360° periodicity
+    d = pred_deg - gt_deg                  # signed difference
+    d = torch.remainder(d + 180.0, 360.0)   # shift, wrap to [0,360°)
+    d = d - 180.0                           # shift back to [-180,180)
+    return d
 
 def save_debug_image(image_tensor, joint_values, save_path,
                      pred_x=None, pred_y=None, pred_angle=None,
@@ -45,53 +61,34 @@ def save_debug_image(image_tensor, joint_values, save_path,
     pred_angle: predicted base joint angle in degrees (optional)
     save_path: where to save the debug image
     """
-    img = image_tensor.permute(1, 2, 0).cpu().numpy()
-
-    def to_symmetric_angle(angle_deg):
-        a = abs(angle_deg)
-        if a > 90:
-            a = 180 - a
-        return a
-
+    img = image_tensor.permute(1, 2, 0).cpu().numpy()  # (H,W,C)
+    
+    # Plot image
     fig, ax = plt.subplots()
     ax.imshow(img)
-
-    # --- GT point ---
+    
     x = joint_values['x'] * image_tensor.shape[2] / nbr_bins_xy
     y = joint_values['y'] * image_tensor.shape[1] / nbr_bins_xy
+
+    # Overlay GT point
     ax.scatter(x, y, c='red', s=40, marker='x', label="GT")
 
-    # --- Prediction point ---
+    # Overlay prediction if provided
     if pred_x is not None and pred_y is not None:
         ax.scatter(pred_x, pred_y, c='lime', s=40, marker='o', label="Prediction")
 
-    # --- Angles ---
-    gt_angle = float(joint_values['base_joint'])
-    gt_sym   = gt_to_sym_0_180(gt_angle)
-
-    angle_text = f"GT: {gt_angle:+.1f}° | GT(sym): {gt_sym:.1f}°"
-
+    # Write angles at bottom
+    angle_text = f"GT: {joint_values['base_joint']:.1f}°"
     if pred_angle is not None:
         angle_text += f" | Pred: {pred_angle:.1f}°"
-
     ax.text(
         0.5, 1.02, angle_text,
-        transform=ax.transAxes,
-        ha='center', va='bottom',
-        fontsize=10,
-        color='white',
-        backgroundcolor='black'
+        transform=ax.transAxes, ha='center', va='bottom',
+        fontsize=10, color='white', backgroundcolor='black'
     )
 
     ax.axis('off')
-    ax.legend(
-        loc="lower right",
-        fontsize=8,
-        facecolor="black",
-        edgecolor="white",
-        labelcolor="white"
-    )
-
+    ax.legend(loc="lower right", fontsize=8, facecolor="black", edgecolor="white", labelcolor="white")
     fig.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
 
@@ -200,8 +197,8 @@ def train(config=None):
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             print(f"Using device: {device}")
 
-            # Load DINOv2
-            backbone_model = torch.hub.load('facebookresearch/dinov2', config['backbone'], force_reload=False)
+            # Load DINOv3
+            backbone_model = torch.hub.load(DINOV3_REPO_DIR, 'dinov3_vitb16', source='local', weights="dinov3/checkpoints/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth", force_reload=False)
             for param in backbone_model.parameters():
                 param.requires_grad = True
 
@@ -210,10 +207,6 @@ def train(config=None):
                 if i < num_blocks_to_freeze:
                     for param in block.parameters():
                         param.requires_grad = False
-            
-            if config.freeze_pos_embed:
-                print("Freezing position embedding.")
-                backbone_model.pos_embed.requires_grad = False
 
             if config.freeze_patch_embed:
                 print("Freezing patch embedding.")
@@ -222,15 +215,14 @@ def train(config=None):
             xy_bin_nbr = config.xy_bin_nbr
 
             # Load model
-            ee_model = model_token_dinov2.EndEffectorPosePredToken(backbone_model, num_classes_joint=config.num_classes, nbr_classes_xy=xy_bin_nbr).to(device)
+            ee_model = model_token_dinov3_reg_u_l_b.EndEffectorPosePredToken(backbone_model).to(device)
             optimizer = torch.optim.AdamW(ee_model.parameters(), lr=config.learning_rate)
             
             scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer,
                                                             total_iters=config.epochs,
                                                             power=config.lr_decay_power)
 
-            criterion_joints = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
-            criterion_pixel = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+            criterion_joints = nn.MSELoss()
 
             # Create a directory to log checkpoints and results
             os.makedirs("training", exist_ok=True)
@@ -240,17 +232,13 @@ def train(config=None):
             timestamp = now.strftime("%Y%m%d_%H%M%S")
             checkpoint_dir = os.path.join("training", f"checkpoint_{timestamp}")
             os.makedirs(checkpoint_dir, exist_ok=True)
-            current_label_smoothing = config.label_smoothing
             target_batch_size = config.target_batch_size
             batch_size = min(config.max_batch_size, target_batch_size)
             accumulation_steps = max(1, target_batch_size // batch_size)
 
-            weight_loss_joints = config.weight_ratio_joints
-            weight_loss_xy = 1.0 - weight_loss_joints
-
             cpu_count = multiprocessing.cpu_count()
-            train_cpu_count = min(16, cpu_count)
-            val_cpu_count = min(16, cpu_count)
+            train_cpu_count = min(2, cpu_count)
+            val_cpu_count = min(2, cpu_count)
             dataloader_train = DataLoader(dataset_train, batch_size=batch_size, num_workers=train_cpu_count, shuffle=True, persistent_workers=True)
 
             if RUN_VALIDATION:
@@ -263,8 +251,8 @@ def train(config=None):
                 running_loss_pixel = 0
                 img_total = 0
                 angular_error_base_joint_total = 0
-                x_error_bin_total = 0
-                y_error_bin_total = 0
+                angular_error_lower_joint_total = 0
+                angular_error_upper_joint_total = 0
                 train_average_error = 0
 
                 for i, (images, joint_values) in enumerate(tqdm.tqdm(dataloader_train, desc=f"Epoch {epoch+1}/{config.epochs}")):
@@ -272,9 +260,25 @@ def train(config=None):
                     step_start_time = time.time()
                     # Reset the gradients
                     optimizer.zero_grad()
-                    base_joint_quant = joint_values['base_joint_quant'].to(device)
-                    base_x = joint_values['x'].to(device)
-                    base_y = joint_values['y'].to(device)
+
+                    base_theta_rad = torch.deg2rad(joint_values['base_joint'].to(device).to(torch.float32))
+                    base_joint_sin_gt = torch.sin(base_theta_rad)
+                    base_joint_cos_gt = torch.cos(base_theta_rad)
+                    base_joint_gt = torch.stack([base_joint_sin_gt, base_joint_cos_gt], dim=-1)
+
+                    lower_theta_rad = torch.deg2rad(joint_values['lower_joint'].to(device).to(torch.float32))
+                    lower_joint_sin_gt = torch.sin(lower_theta_rad)
+                    lower_joint_cos_gt = torch.cos(lower_theta_rad)
+                    lower_joint_gt = torch.stack([lower_joint_sin_gt, lower_joint_cos_gt], dim=-1)
+
+                    upper_theta_rad = torch.deg2rad(joint_values['upper_joint'].to(device).to(torch.float32))
+                    upper_joint_sin_gt = torch.sin(upper_theta_rad)
+                    upper_joint_cos_gt = torch.cos(upper_theta_rad)
+                    upper_joint_gt = torch.stack([upper_joint_sin_gt, upper_joint_cos_gt], dim=-1)
+
+                    base_joint_gt = base_joint_gt.to(torch.float32)
+                    lower_joint_gt = lower_joint_gt.to(torch.float32)
+                    upper_joint_gt = upper_joint_gt.to(torch.float32)
 
                     if DEBUG > 2:
                         # Save all images in the batch to disk for debugging
@@ -287,16 +291,18 @@ def train(config=None):
 
                     images = images.to(device)
 
-                    base_joint_logits, base_x_logits, base_y_logits = ee_model(images)
+                    base_joint_sincos, lower_joint_sincos, upper_joint_sincos = ee_model(images)
+                    base_joint_sincos = normalize_2d(base_joint_sincos)
+                    lower_joint_sincos = normalize_2d(lower_joint_sincos)
+                    upper_joint_sincos = normalize_2d(upper_joint_sincos)
 
                     # Compute loss
-                    loss_joints = criterion_joints(base_joint_logits, base_joint_quant)
-                    loss_pixel = criterion_pixel(base_x_logits, base_x) + criterion_pixel(base_y_logits, base_y)
+                    loss_base_joint = criterion_joints(base_joint_sincos, base_joint_gt)
+                    loss_lower_joint = criterion_joints(lower_joint_sincos, lower_joint_gt)
+                    loss_upper_joint = criterion_joints(upper_joint_sincos, upper_joint_gt)
                     
-                    loss = (loss_joints * weight_loss_joints) + (loss_pixel * weight_loss_xy)
+                    loss = loss_base_joint + loss_lower_joint + loss_upper_joint
                     running_loss += loss.item()
-                    running_loss_joints += loss_joints.item()
-                    running_loss_pixel += loss_pixel.item()
                     
                     loss.backward()
 
@@ -316,62 +322,40 @@ def train(config=None):
 
                     if COMPUTE_ERROR_IN_TRAINING:
                         # Predictions
-                        base_joint_preds = base_joint_logits.argmax(dim=1)
-                        base_x_preds = base_x_logits.argmax(dim=1)
-                        base_y_preds = base_y_logits.argmax(dim=1)
+                        theta_base_pred_rad = torch.atan2(base_joint_sincos[:, 0], base_joint_sincos[:, 1])
+                        theta_base_pred_deg = torch.rad2deg(theta_base_pred_rad)
+                        theta_base_gt_deg = joint_values['base_joint'].to(device).to(torch.float32)
+                        angular_error_base_joint = ang_error_deg_period360(theta_base_pred_deg, theta_base_gt_deg)
+                        angular_error_base_joint_total += torch.abs(angular_error_base_joint).sum().item()
 
-                        # Convert to angles
-                        base_joint_pred_angles = eefdataset.class_to_angle(base_joint_preds, config.ground_truth_precision, symmetric=True)
-                        base_joint_gt_angles = eefdataset.class_to_angle(base_joint_quant, config.ground_truth_precision, symmetric=True)
-                        if VERBOSE > 0:
-                            print(f"base_joint_pred_angles: {base_joint_pred_angles}")
-                            print(f"target_base: {base_joint_quant}")
-                            print(f"base_joint_gt_angles: {base_joint_gt_angles}")
+                        theta_lower_pred_rad = torch.atan2(lower_joint_sincos[:, 0], lower_joint_sincos[:, 1])
+                        theta_lower_pred_deg = torch.rad2deg(theta_lower_pred_rad)
+                        theta_lower_gt_deg = joint_values['lower_joint'].to(device).to(torch.float32)
+                        angular_error_lower_joint = ang_error_deg_period360(theta_lower_pred_deg, theta_lower_gt_deg)
+                        angular_error_lower_joint_total += torch.abs(angular_error_lower_joint).sum().item()
 
-                        # Compute angular error
-                        angular_error_base_joint = torch.abs(base_joint_pred_angles - base_joint_gt_angles)
-
-                        # Fix the angular error calculation because right now if we predict 0 and GT is 179, we get 179 which is not correct as the error should be 1
-                        angular_error_base_joint = torch.where(angular_error_base_joint > 90, 180 - angular_error_base_joint, angular_error_base_joint)
-
-                        # Accumulate for epoch
-                        angular_error_base_joint_total += angular_error_base_joint.sum().item()
-
-                        x_error_bin = torch.abs(base_x_preds - base_x)
-                        y_error_bin = torch.abs(base_y_preds - base_y)
-                        x_error_bin_total += x_error_bin.sum().item()
-                        y_error_bin_total += y_error_bin.sum().item()
-
-                        if DEBUG > 0:
-                            if (i % 5 == 0) and (images.size(0) > 0):
-                                debug_dir = os.path.join(checkpoint_dir, "debug_samples")
-                                os.makedirs(debug_dir, exist_ok=True)
-                                save_debug_image(
-                                    images[0],   # first image in batch
-                                    {k: v[0].item() if hasattr(v, 'numpy') or torch.is_tensor(v) else v
-                                    for k, v in joint_values.items()},
-                                    os.path.join(debug_dir, f"train_epoch{epoch+1}_batch{i+1}.png"),
-                                    pred_x=base_x_preds[0].item() / xy_bin_nbr * images.shape[3],   # convert normalized back to pixels
-                                    pred_y=base_y_preds[0].item() / xy_bin_nbr * images.shape[2],
-                                    pred_angle=base_joint_pred_angles[0].item()
-                                )
+                        theta_upper_pred_rad = torch.atan2(upper_joint_sincos[:, 0], upper_joint_sincos[:, 1])
+                        theta_upper_pred_deg = torch.rad2deg(theta_upper_pred_rad)
+                        theta_upper_gt_deg = joint_values['upper_joint'].to(device).to(torch.float32)
+                        angular_error_upper_joint = ang_error_deg_period360(theta_upper_pred_deg, theta_upper_gt_deg)
+                        angular_error_upper_joint_total += torch.abs(angular_error_upper_joint).sum().item()
 
                 epoch_loss = running_loss / img_total
-                running_loss_joints /= img_total
-                running_loss_pixel /= img_total
                 mean_ae_base_joint_train = angular_error_base_joint_total / img_total
-                mean_x_error_bin_train = x_error_bin_total / img_total
-                mean_y_error_bin_train = y_error_bin_total / img_total
-                train_average_error = ((mean_ae_base_joint_train / config.num_classes) + (mean_x_error_bin_train / xy_bin_nbr) + (mean_y_error_bin_train / xy_bin_nbr)) / 3.0
+                mean_ae_lower_joint_train = angular_error_lower_joint_total / img_total
+                mean_ae_upper_joint_train = angular_error_upper_joint_total / img_total
+                train_average_error = (mean_ae_base_joint_train + mean_ae_lower_joint_train + mean_ae_upper_joint_train) / 3.0
 
                 scheduler.step()
 
                 angular_error_base_joint_total = 0
+                angular_error_lower_joint_total = 0
+                angular_error_upper_joint_total = 0
                 x_error_bin_total = 0
                 y_error_bin_total = 0
                 mean_ae_base_joint_val = 0
-                mean_x_error_bin_val = 0
-                mean_y_error_bin_val = 0
+                mean_ae_lower_joint_val = 0
+                mean_ae_upper_joint_val = 0
                 if RUN_VALIDATION:
                     # Validation step
                     ee_model.eval()
@@ -380,81 +364,70 @@ def train(config=None):
                         for i, (images, joint_values) in enumerate(tqdm.tqdm(dataloader_val, desc=f"Validation Epoch {epoch+1}/{config.epochs}")):
                             total_img_count += images.size(0)
 
-                            base_joint_quant = joint_values['base_joint_quant'].to(device)
-                            base_x = joint_values['x'].to(device)
-                            base_y = joint_values['y'].to(device)
+                            base_theta_rad = torch.deg2rad(joint_values['base_joint'].to(device).to(torch.float32))
+                            base_joint_sin_gt = torch.sin(base_theta_rad)
+                            base_joint_cos_gt = torch.cos(base_theta_rad)
+                            base_joint_gt = torch.stack([base_joint_sin_gt, base_joint_cos_gt], dim=-1)
+                            base_joint_gt = base_joint_gt.to(torch.float32)
+                            lower_theta_rad = torch.deg2rad(joint_values['lower_joint'].to(device).to(torch.float32))
+                            lower_joint_sin_gt = torch.sin(lower_theta_rad)
+                            lower_joint_cos_gt = torch.cos(lower_theta_rad)
+                            lower_joint_gt = torch.stack([lower_joint_sin_gt, lower_joint_cos_gt], dim=-1)
+                            lower_joint_gt = lower_joint_gt.to(torch.float32)
+                            upper_theta_rad = torch.deg2rad(joint_values['upper_joint'].to(device).to(torch.float32))
+                            upper_joint_sin_gt = torch.sin(upper_theta_rad)
+                            upper_joint_cos_gt = torch.cos(upper_theta_rad)
+                            upper_joint_gt = torch.stack([upper_joint_sin_gt, upper_joint_cos_gt], dim=-1)
+                            upper_joint_gt = upper_joint_gt.to(torch.float32)
 
                             images = images.to(device)
 
-                            if torch.any(base_x > xy_bin_nbr) or torch.any(base_y > xy_bin_nbr):
-                                print(f"Warning: Target pixel coordinates exceed xy_bin_nbr in validation.")
-                                print(f"target_x: {base_x}, target_y: {base_y}")
+                            base_joint_sincos, lower_joint_sincos, upper_joint_sincos = ee_model(images)
 
-                            base_joint_logits, base_x_logits, base_y_logits = ee_model(images)
+                            base_joint_sincos = normalize_2d(base_joint_sincos)
+                            base_joint_preds = torch.atan2(base_joint_sincos[:, 0], base_joint_sincos[:, 1])  # radians
 
-                            base_joint_preds = base_joint_logits.argmax(dim=1)
-                            base_x_preds = base_x_logits.argmax(dim=1)
-                            base_y_preds = base_y_logits.argmax(dim=1)
-                            base_joint_pred_angles = eefdataset.class_to_angle(base_joint_preds, config.ground_truth_precision, symmetric=True)
-                            base_joint_gt_angles = eefdataset.class_to_angle(base_joint_quant, config.ground_truth_precision, symmetric=True)
+                            lower_joint_sincos = normalize_2d(lower_joint_sincos)
+                            lower_joint_preds = torch.atan2(lower_joint_sincos[:, 0], lower_joint_sincos[:, 1])  # radians
+
+                            upper_joint_sincos = normalize_2d(upper_joint_sincos)
+                            upper_joint_preds = torch.atan2(upper_joint_sincos[:, 0], upper_joint_sincos[:, 1])  # radians
                             
-                            angular_error_base_joint = torch.abs(base_joint_pred_angles - base_joint_gt_angles)
-                            angular_error_base_joint = torch.where(angular_error_base_joint > 90, 180 - angular_error_base_joint, angular_error_base_joint)
-                            angular_error_base_joint_total += angular_error_base_joint.sum().item()
+                            theta_base_pred_deg = torch.rad2deg(base_joint_preds)
+                            theta_base_gt_deg = joint_values['base_joint'].to(device).to(torch.float32)
+                            angular_error_base_joint = ang_error_deg_period360(theta_base_pred_deg, theta_base_gt_deg)
+                            angular_error_base_joint_total += torch.abs(angular_error_base_joint).sum().item()
 
-                            x_error_bin = torch.abs(base_x_preds - base_x)
-                            y_error_bin = torch.abs(base_y_preds - base_y)
+                            theta_lower_pred_deg = torch.rad2deg(lower_joint_preds)
+                            theta_lower_gt_deg = joint_values['lower_joint'].to(device).to(torch.float32)
+                            angular_error_lower_joint = ang_error_deg_period360(theta_lower_pred_deg, theta_lower_gt_deg)
+                            angular_error_lower_joint_total += torch.abs(angular_error_lower_joint).sum().item()
 
-                            x_error_bin_total += x_error_bin.sum().item()
-                            y_error_bin_total += y_error_bin.sum().item()
-                            if VERBOSE > 0:
-                                print(f"Validation batch processed: {images.size(0)} images.")
-                                print(f"x_error_bin: {x_error_bin_total}, y_error_bin: {y_error_bin_total}")
+                            theta_upper_pred_deg = torch.rad2deg(upper_joint_preds)
+                            theta_upper_gt_deg = joint_values['upper_joint'].to(device).to(torch.float32)
+                            angular_error_upper_joint = ang_error_deg_period360(theta_upper_pred_deg, theta_upper_gt_deg)
+                            angular_error_upper_joint_total += torch.abs(angular_error_upper_joint).sum().item()
 
-                            if DEBUG > 0:
-                                if (i % 5 == 0) and (images.size(0) > 0):
-                                    debug_dir = os.path.join(checkpoint_dir, "debug_samples")
-                                    os.makedirs(debug_dir, exist_ok=True)
-                                    save_debug_image(
-                                        images[0],   # first image in batch
-                                        {k: v[0].item() if hasattr(v, 'numpy') or torch.is_tensor(v) else v
-                                        for k, v in joint_values.items()},
-                                        os.path.join(debug_dir, f"val_epoch{epoch+1}_batch{i+1}.png"),
-                                        pred_x=base_x_preds[0].item() / xy_bin_nbr * images.shape[3],   # convert normalized back to pixels
-                                        pred_y=base_y_preds[0].item() / xy_bin_nbr * images.shape[2],
-                                        pred_angle=base_joint_pred_angles[0].item()
-                                    )
 
                     print(f"Validation: {total_img_count} images processed.")
-                    print(f"x_error_bin_total: {x_error_bin_total}, y_error_pixel_total: {y_error_bin_total}")
-                    mean_ae_base_joint_val = angular_error_base_joint_total / len(dataloader_val.dataset)
-                    mean_x_error_bin_val = x_error_bin_total / len(dataloader_val.dataset)
-                    mean_y_error_bin_val = y_error_bin_total / len(dataloader_val.dataset)
+                    mean_ae_base_joint_val = angular_error_base_joint_total / total_img_count
+                    mean_ae_lower_joint_val = angular_error_lower_joint_total / total_img_count
+                    mean_ae_upper_joint_val = angular_error_upper_joint_total / total_img_count
 
-                print(f"[Epoch {epoch+1}/{config.epochs}] Loss: {epoch_loss:.4f} | base_joint AE: {mean_ae_base_joint_val:.4f}")
+                print(f"[Epoch {epoch+1}/{config.epochs}] Loss: {epoch_loss:.4f} | base_joint AE: {mean_ae_base_joint_val:.4f} | lower_joint AE: {mean_ae_lower_joint_val:.4f} | upper_joint AE: {mean_ae_upper_joint_val:.4f}")	
                 current_lr = optimizer.param_groups[0]['lr']
                 wandb.log({
                     "epoch": epoch + 1,
                     "learning_rate": current_lr,
-                    "label_smoothing": current_label_smoothing,
-                    "train_angular_error_joint3": mean_ae_base_joint_train,
-                    "train_x_error_pixel": mean_x_error_bin_train,
-                    "train_y_error_pixel": mean_y_error_bin_train,
+                    "train_angular_error_base": mean_ae_base_joint_train,
+                    "train_angular_error_lower": mean_ae_lower_joint_train,
+                    "train_angular_error_upper": mean_ae_upper_joint_train,
                     "loss": epoch_loss,
-                    "loss_joints": running_loss_joints,
-                    "loss_pixel": running_loss_pixel,
-                    "val_angular_error_joint3": mean_ae_base_joint_val,
-                    "val_x_error_pixel": mean_x_error_bin_val,
-                    "val_y_error_pixel": mean_y_error_bin_val,
+                    "val_angular_error_base": mean_ae_base_joint_val,
+                    "val_angular_error_lower": mean_ae_lower_joint_val,
+                    "val_angular_error_upper": mean_ae_upper_joint_val,
                     "train_average_error": train_average_error
                 })
-
-                # Reduce label smoothing
-                if current_label_smoothing > 0:
-                    current_label_smoothing = current_label_smoothing - (config.label_smoothing * config.reduce_label_smoothing)
-                    if current_label_smoothing < 0:
-                        current_label_smoothing = 0
-                    criterion_joints = nn.CrossEntropyLoss(label_smoothing=current_label_smoothing)
                 
                 # Save model checkpoint
                 checkpoint_path = os.path.join(checkpoint_dir, f"model_checkpoint.pt")

@@ -4,9 +4,10 @@ import math
 import os
 
 GT_PRECISION = 1 # Degrees that the GT will be rounded to (e.g. if set to 5, then a GT of 12 will be set to 10)
-EPOCHS = 40
-LEARNING_RATE = [1e-7, 1e-8]
-BACKBONE = 'dinov2_vitb14_reg'
+EPOCHS = 20
+LEARNING_RATE_MIN = 1e-6
+LEARNING_RATE_MAX = 1e-4
+BACKBONE = 'dinov3_vits16'
 NUM_CLASSES = math.ceil(360 / GT_PRECISION)
 RANDOM_SEED = 42
 LABEL_SMOOTHING_MAX = 0.05
@@ -17,7 +18,7 @@ REDUCE_LABEL_SMOOTHING_MAX = 0.05
 SAMPLES_PER_CLASS = 3
 LEFT_CROPPING = 398
 RIGHT_CROPPING = 856
-FREEZE_BLOCKS = [0, 2, 4, 6]  # Max number of blocks in the backbone is 11
+FREEZE_BLOCKS = [0, 2]  # Max number of blocks in the backbone is 11
 MAX_BATCH_SIZE = 4
 TARGET_BATCH_SIZE = [4]
 FREEZE_POS_EMBED = False
@@ -45,16 +46,16 @@ sweep_config = {
         "num_classes": {"value": NUM_CLASSES},
         "train_main_folder_path": {"value": MAIN_TRAIN_FOLDER},
         "val_main_folder_path": {"value": VAL_TRAIN_FOLDER},
-        "learning_rate": {"values": LEARNING_RATE},
-        "label_smoothing": {"distribution": "uniform", "max": LABEL_SMOOTHING_MAX, "min": LABEL_SMOOTHING_MIN},
+        "learning_rate": {"distribution": "uniform", "max": LEARNING_RATE_MAX, "min": LEARNING_RATE_MIN},
+        #"label_smoothing": {"distribution": "uniform", "max": LABEL_SMOOTHING_MAX, "min": LABEL_SMOOTHING_MIN},
         "lr_decay_power": {"values": LR_DECAY_POWER},
-        "reduce_label_smoothing": {"distribution": "uniform", "max": REDUCE_LABEL_SMOOTHING_MAX, "min": REDUCE_LABEL_SMOOTHING_MIN},
+        #"reduce_label_smoothing": {"distribution": "uniform", "max": REDUCE_LABEL_SMOOTHING_MAX, "min": REDUCE_LABEL_SMOOTHING_MIN},
         "samples_per_class": {"value": SAMPLES_PER_CLASS},
         "left_cropping": {"value": LEFT_CROPPING},
         "right_cropping": {"value": RIGHT_CROPPING},
         "top_cropping": {"value": 1},
         "bottom_cropping": {"value": 2},
-        "weight_ratio_joints": {"distribution": "uniform", "max": 1.0, "min": 0.0},
+        "weight_ratio_joints": {"distribution": "uniform", "max": 1.0, "min": 0.7},
         "target_batch_size": {"values": TARGET_BATCH_SIZE},
         "freeze_blocks": {"values": FREEZE_BLOCKS},
         "freeze_pos_embed": {"value": FREEZE_POS_EMBED},

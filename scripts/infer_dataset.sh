@@ -1,4 +1,4 @@
-python infer_token_x_y_rot.py \
+python infer_token_x_y_rot_dinov2.py \
     --checkpoint /home/wilah/workspace/EndEffectorTrackingNN/training/checkpoint_20251110_150106/model_checkpoint.pt \
     --dataset /home/wilah/datasets/heshan_october_grapple_data \
     --output_dir results_inference_with_data_aug \

@@ -15,3 +15,5 @@
 /slurm_output
 /torch_models
 .vscode/launch.json
+/image_annotator
+/results*
