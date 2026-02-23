@@ -88,7 +88,7 @@ def save_debug_image(image_tensor, joint_values, save_path,
     fig.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
 
-def half_pixels_resize_and_pad(img, s=0.5):
+def half_pixels_resize_and_pad(img, s=1):
     if hasattr(img, "size"):  # PIL Image
         new_w = round(img.width * s)
         new_h = round(img.height * s)
@@ -153,11 +153,11 @@ def train(config=None):
         with wandb.init(config=config):
             config = wandb.config
             random.seed(config.random_seed)
+            log_interval = getattr(config, "log_interval", 50)
             # Log the time to build the datasets
             start_time = datetime.datetime.now()
             transform_train = T.Compose([T.Lambda(lambda img: TF.rotate(img, 180)),
                                         T.Lambda(lambda img: TF.crop(img, top=config.top_cropping, left=config.left_cropping, height=img.height - config.bottom_cropping, width=img.width - config.right_cropping)),
-                                        #T.Resize((532,532)),
                                         T.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.3),
                                         T.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 2.0)),
                                         T.RandomInvert(),
@@ -232,8 +232,8 @@ def train(config=None):
             os.makedirs(checkpoint_dir, exist_ok=True)
             #target_batch_size = config.target_batch_size
             #batch_size = min(config.max_batch_size, target_batch_size)
-            target_batch_size = 48
-            batch_size = 48
+            target_batch_size = 4
+            batch_size = 4
             accumulation_steps = max(1, target_batch_size // batch_size)
 
             weight_loss_joints = config.weight_ratio_joints
@@ -257,6 +257,10 @@ def train(config=None):
                 x_error_bin_total = 0
                 y_error_bin_total = 0
                 train_average_error = 0
+
+                running_loss_interval = 0.0
+                running_loss_joints_interval = 0.0
+                running_loss_pixel_interval = 0.0
 
                 for i, (images, joint_values) in enumerate(tqdm.tqdm(dataloader_train, desc=f"Epoch {epoch+1}/{config.epochs}")):
                     # Start a timer to measure the training step duration
@@ -298,6 +302,36 @@ def train(config=None):
                     
                     loss.backward()
 
+                    # accumulate interval stats
+                    running_loss_interval += loss.item()
+                    running_loss_joints_interval += loss_joints.item()
+                    running_loss_pixel_interval += loss_pixel.item()
+
+                    # log every N batches
+                    if (i + 1) % log_interval == 0:
+                        avg_loss_interval = running_loss_interval / log_interval
+                        avg_loss_joints_interval = running_loss_joints_interval / log_interval
+                        avg_loss_pixel_interval = running_loss_pixel_interval / log_interval
+
+                        wandb.log({
+                            "train_batch_loss": avg_loss_interval,
+                            "train_batch_loss_joints": avg_loss_joints_interval,
+                            "train_batch_loss_pixel": avg_loss_pixel_interval,
+                            "epoch": epoch + 1,
+                            "batch": i + 1,
+                            "learning_rate": optimizer.param_groups[0]["lr"],
+                        })
+
+                        print(
+                            f"Epoch {epoch+1} | Batch {i+1}/{len(dataloader_train)} "
+                            f"| Loss {avg_loss_interval:.4f}"
+                        )
+
+                        # reset interval counters
+                        running_loss_interval = 0.0
+                        running_loss_joints_interval = 0.0
+                        running_loss_pixel_interval = 0.0
+
                     # Debug gradient
                     if VERBOSE > 1:
                         for name, param in ee_model.named_parameters():
@@ -323,12 +357,8 @@ def train(config=None):
                         base_x_preds = base_x
                         base_y_preds = base_y
 
-                        if VERBOSE > 0:
-                            print(f"base_joint_pred_angles: {base_joint_preds}")
-                            print(f"target_base: {base_joint_quant}")
-
                         angular_error_base_joint = ang_error_deg_period180(theta_pred_deg, theta_gt_deg)
-                        angular_error_base_joint_total += angular_error_base_joint.sum().item()
+                        angular_error_base_joint_total += torch.abs(angular_error_base_joint).sum().item()
 
                         x_error = torch.abs(base_x_preds - base_x_gt)
                         y_error = torch.abs(base_y_preds - base_y_gt)
@@ -387,11 +417,10 @@ def train(config=None):
 
                             base_joint_sincos, base_x, base_y = ee_model(images)
 
-                            base_joint_preds = torch.atan2(base_joint_sincos[:, 0], base_joint_sincos[:, 1])  # radians
                             base_x_preds = base_x
                             base_y_preds = base_y
                             
-                            base_joint_preds = normalize_2d(base_joint_sincos)
+                            base_joint_sincos = normalize_2d(base_joint_sincos)
                             # Predictions
                             phi = torch.atan2(base_joint_sincos[:, 0], base_joint_sincos[:, 1])
                             theta_pred_rad = 0.5 * phi
@@ -399,7 +428,7 @@ def train(config=None):
                             theta_pred_deg = torch.rad2deg(theta_pred_rad)
                             theta_gt_deg = joint_values['base_joint'].to(device).to(torch.float32)
                             angular_error_base_joint = ang_error_deg_period180(theta_pred_deg, theta_gt_deg)
-                            angular_error_base_joint_total += angular_error_base_joint.sum().item()
+                            angular_error_base_joint_total += torch.abs(angular_error_base_joint).sum().item()
 
                             x_error_bin = torch.abs(base_x_preds - base_x_gt)
                             y_error_bin = torch.abs(base_y_preds - base_y_gt)
@@ -421,7 +450,7 @@ def train(config=None):
                                         os.path.join(debug_dir, f"val_epoch{epoch+1}_batch{i+1}.png"),
                                         pred_x=base_x_preds[0].item() / xy_bin_nbr * images.shape[3],   # convert normalized back to pixels
                                         pred_y=base_y_preds[0].item() / xy_bin_nbr * images.shape[2],
-                                        pred_angle=base_joint_preds[0].item()
+                                        pred_angle=angular_error_base_joint[0].item()
                                     )
 
                     print(f"Validation: {total_img_count} images processed.")

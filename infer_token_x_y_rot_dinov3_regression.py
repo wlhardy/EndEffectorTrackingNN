@@ -1,6 +1,7 @@
 import torch
 import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as TF
+from torchvision.transforms.v2 import InterpolationMode
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
@@ -16,11 +17,33 @@ import model_token_dinov3_reg
 # Reuse the exact helper functions / conventions used in your regression training script
 from train_token_x_y_rot_dinov3_reg import (
     save_debug_image,
-    half_pixels_resize_and_pad,
+    ang_error_deg_period180,
     discover_dataset_folders,
     normalize_2d,
-    ang_error_deg_period180,
 )
+
+def half_pixels_resize_and_pad(img, s=np.sqrt(0.25)):
+    if hasattr(img, "size"):  # PIL Image
+        new_w = round(img.width * s)
+        new_h = round(img.height * s)
+        img = TF.resize(img, (new_h, new_w), interpolation=InterpolationMode.BILINEAR, antialias=True)
+        cur_w, cur_h = img.size
+    else:  # Tensor (C,H,W)
+        _, h, w = img.shape
+        new_h = round(h * s)
+        new_w = round(w * s)
+        img = TF.resize(img, (new_h, new_w), interpolation=InterpolationMode.BILINEAR, antialias=True)
+        _, cur_h, cur_w = img.shape
+
+    # Compute padding
+    pad_w = (14 - cur_w % 14) % 14
+    pad_h = (14 - cur_h % 14) % 14
+
+    if pad_w or pad_h:
+        # Pad format in torchvision = (left, top, right, bottom)
+        img = TF.pad(img, (0, 0, pad_w, pad_h), fill=0)
+
+    return img
 
 DINOV3_REPO_DIR = "dinov3"
 DINO_CHECKPOINT_DICT = {
@@ -258,8 +281,8 @@ def run_inference(args):
     angular_errors = results[:, 1]
     gt_angles = results[:, 5]
 
-    mean_err = np.mean(np.abs(angular_errors))
-    std_err = np.std(np.abs(angular_errors))
+    mean_err = np.mean(angular_errors)
+    std_err = np.std(angular_errors)
     stats_text = f"Mean: {mean_err:.2f}°\nStd: {std_err:.2f}°"
 
     plt.figure()
@@ -301,10 +324,10 @@ def run_inference(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inference (regression) for EndEffectorPosePredToken (DINOv3)")
-    parser.add_argument("--checkpoint", type=str, help="Path to model checkpoint (.pt)", default="/home/wilah/workspace/EndEffectorTrackingNN/training/dinov3_small_reg_x_y_rot/model_checkpoint.pt")
-    parser.add_argument("--dinov3_size", type=str, choices=["dinov3_vitb16", "dinov3_vitl16", "dinov3_vits16"], help="DINOv3 backbone size", default="dinov3_vits16")
+    parser.add_argument("--checkpoint", type=str, help="Path to model checkpoint (.pt)", default="/home/wilah/workspace/EndEffectorTrackingNN/training/dinov3_base_reg_x_y_rot_quarter_res/model_checkpoint.pt")
+    parser.add_argument("--dinov3_size", type=str, choices=["dinov3_vitb16", "dinov3_vitl16", "dinov3_vits16"], help="DINOv3 backbone size", default="dinov3_vitb16")
     parser.add_argument("--dataset", type=str, help="Path to dataset folder (same structure as training)", default="/home/wilah/datasets/heshan_october_grapple_data")
-    parser.add_argument("--output_dir", type=str, help="Output folder for results", default="results_inference_with_data_aug_reg/dinov3_small_reg_x_y_rot")
+    parser.add_argument("--output_dir", type=str, help="Output folder for results", default="results_inference_with_data_aug_reg/dinov3_base_reg_x_y_rot_test_infer_script_quarter_res")
     parser.add_argument("--precision", type=float, default=1.0, help="Ground truth precision used in dataset")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--top_n", type=int, default=30, help="Number of worst/best predictions to save")

@@ -4,10 +4,10 @@ import math
 import os
 
 GT_PRECISION = 1 # Degrees that the GT will be rounded to (e.g. if set to 5, then a GT of 12 will be set to 10)
-EPOCHS = 20
+EPOCHS = 3
 LEARNING_RATE_MIN = 1e-6
-LEARNING_RATE_MAX = 1e-4
-BACKBONE = 'dinov3_vits16'
+LEARNING_RATE_MAX = 5e-5
+BACKBONE = 'dinov3_vitb16'
 NUM_CLASSES = math.ceil(360 / GT_PRECISION)
 RANDOM_SEED = 42
 LABEL_SMOOTHING_MAX = 0.05
@@ -55,7 +55,7 @@ sweep_config = {
         "right_cropping": {"value": RIGHT_CROPPING},
         "top_cropping": {"value": 1},
         "bottom_cropping": {"value": 2},
-        "weight_ratio_joints": {"distribution": "uniform", "max": 1.0, "min": 0.7},
+        "weight_ratio_joints": {"distribution": "uniform", "max": 1.0, "min": 0.85},
         "target_batch_size": {"values": TARGET_BATCH_SIZE},
         "freeze_blocks": {"values": FREEZE_BLOCKS},
         "freeze_pos_embed": {"value": FREEZE_POS_EMBED},
