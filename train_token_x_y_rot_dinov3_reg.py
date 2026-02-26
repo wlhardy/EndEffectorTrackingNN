@@ -88,7 +88,7 @@ def save_debug_image(image_tensor, joint_values, save_path,
     fig.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
 
-def half_pixels_resize_and_pad(img, s=1):
+def half_pixels_resize_and_pad(img, s=np.sqrt(0.5)):
     if hasattr(img, "size"):  # PIL Image
         new_w = round(img.width * s)
         new_h = round(img.height * s)
@@ -214,10 +214,6 @@ def train(config=None):
             # Load model
             ee_model = model_token_dinov3_reg.EndEffectorPosePredToken(backbone_model).to(device)
             optimizer = torch.optim.AdamW(ee_model.parameters(), lr=config.learning_rate)
-            
-            scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer,
-                                                            total_iters=config.epochs,
-                                                            power=config.lr_decay_power)
 
             criterion_joints = nn.MSELoss()
             criterion_pixel = nn.MSELoss()
@@ -232,8 +228,8 @@ def train(config=None):
             os.makedirs(checkpoint_dir, exist_ok=True)
             #target_batch_size = config.target_batch_size
             #batch_size = min(config.max_batch_size, target_batch_size)
-            target_batch_size = 4
-            batch_size = 4
+            target_batch_size = 1
+            batch_size = 1
             accumulation_steps = max(1, target_batch_size // batch_size)
 
             weight_loss_joints = config.weight_ratio_joints
@@ -246,6 +242,24 @@ def train(config=None):
 
             if RUN_VALIDATION:
                 dataloader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, num_workers=val_cpu_count, persistent_workers=True)
+
+            num_training_steps = np.ceil(len(dataloader_train) / log_interval)
+            print(f"Number of training steps per epoch: {num_training_steps}")
+            num_warmup_steps = int(0.1 * num_training_steps)
+            print(f"Number of warmup steps: {num_warmup_steps}")
+
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[
+                    torch.optim.lr_scheduler.LinearLR(
+                        optimizer, start_factor=0.01, total_iters=num_warmup_steps
+                    ),
+                    torch.optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer, T_max=num_training_steps - num_warmup_steps
+                    )
+                ],
+                milestones=[num_warmup_steps]
+            )
 
             for epoch in range(config.epochs):
                 ee_model.train()
@@ -265,8 +279,6 @@ def train(config=None):
                 for i, (images, joint_values) in enumerate(tqdm.tqdm(dataloader_train, desc=f"Epoch {epoch+1}/{config.epochs}")):
                     # Start a timer to measure the training step duration
                     step_start_time = time.time()
-                    # Reset the gradients
-                    optimizer.zero_grad()
                     theta_rad = torch.deg2rad(joint_values['base_joint'].to(device).to(torch.float32))
                     base_joint_sin_gt = torch.sin(2.0 * theta_rad)
                     base_joint_cos_gt = torch.cos(2.0 * theta_rad)

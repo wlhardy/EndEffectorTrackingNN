@@ -37,30 +37,50 @@ def load_image_as_tensor(image_path, rotate=False):
 
 
 class EndEffectorPosePredToken(nn.Module):
-    def __init__(self, backbone, num_classes_joint, nbr_classes_xy, nbr_tokens=3):
+    def __init__(self, backbone, nbr_tokens=3):
         super().__init__()
         self.backbone = backbone
         self.patch_size = backbone.patch_size
-        embed_dim = backbone.embed_dim  # usually 1024 or 768
+        embed_dim = backbone.embed_dim
         self.nbr_tokens = nbr_tokens
-        
-        self.learnable_tokens = nn.Parameter(torch.randn(1, self.nbr_tokens, embed_dim))
-        self.learnable_tokens_pos_embed = self.backbone.pos_embed[:, 0, :].unsqueeze(1).repeat(1, self.nbr_tokens, 1)
 
+        self.learnable_tokens = nn.Parameter(torch.randn(1, self.nbr_tokens, embed_dim))
+        self.learnable_tokens_pos_embed = (
+            self.backbone.pos_embed[:, 0, :].unsqueeze(1).repeat(1, self.nbr_tokens, 1)
+        )
         nn.init.normal_(self.learnable_tokens, std=1e-6)
 
+        # extend pos_embed to include the extra tokens (same as your current code)
         original_patch_pos_embed = self.backbone.pos_embed[:, 1:, :]
         new_pos_embed = torch.cat([self.learnable_tokens_pos_embed, original_patch_pos_embed], dim=1)
         self.backbone.pos_embed = nn.Parameter(new_pos_embed)
 
-        self.base_joint_head = nn.Linear(embed_dim, num_classes_joint // 2)
-        self.base_x_head = nn.Linear(embed_dim, nbr_classes_xy)
-        self.base_y_head = nn.Linear(embed_dim, nbr_classes_xy)
-        
+        # --- REGRESSION HEADS (match your DINOv3 style) ---
+        self.base_joint_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, 2),   # sin(2θ), cos(2θ)
+        )
+        self.base_x_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, 1),   # x
+        )
+        self.base_y_head = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, embed_dim // 2),
+            nn.ReLU(),
+            nn.Linear(embed_dim // 2, 1),   # y
+        )
+
         self.norm = backbone.norm
 
     def interpolate_pos_encoding(self, x, w, h):
-        # Taken and adapted from DINO:
         previous_dtype = x.dtype
         npatch = x.shape[1] - self.nbr_tokens
         N = self.backbone.pos_embed.shape[1] - self.nbr_tokens
@@ -72,25 +92,23 @@ class EndEffectorPosePredToken(nn.Module):
         dim = x.shape[-1]
         w0 = w // self.patch_size
         h0 = h // self.patch_size
-        M = int(math.sqrt(N))  # Recover the number of patches in each dimension
+        M = int(math.sqrt(N))
         assert N == M * M
+
         kwargs = {}
         if self.backbone.interpolate_offset:
-            # Historical kludge: add a small number to avoid floating point error in the interpolation, see https://github.com/facebookresearch/dino/issues/8
-            # Note: still needed for backward-compatibility, the underlying operators are using both output size and scale factors
             sx = float(w0 + self.backbone.interpolate_offset) / M
             sy = float(h0 + self.backbone.interpolate_offset) / M
             kwargs["scale_factor"] = (sx, sy)
         else:
-            # Simply specify an output size instead of a scale factor
             kwargs["size"] = (w0, h0)
+
         patch_pos_embed = nn.functional.interpolate(
             patch_pos_embed.reshape(1, M, M, dim).permute(0, 3, 1, 2),
             mode="bicubic",
             antialias=self.backbone.interpolate_antialias,
             **kwargs,
         )
-        assert (w0, h0) == patch_pos_embed.shape[-2:]
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return torch.cat((class_pos_embed, patch_pos_embed), dim=1).to(previous_dtype)
 
@@ -99,14 +117,19 @@ class EndEffectorPosePredToken(nn.Module):
         x = self.backbone.patch_embed(x)
         tokens = self.learnable_tokens.expand(B, -1, -1)
         x = torch.cat((tokens, x), dim=1)
+
         x = x + self.interpolate_pos_encoding(x, W, H)
+
         for blk in self.backbone.blocks:
             x = blk(x)
+
         x = self.norm(x)
-        base_joint_task_token_out = x[:, :1, :]
-        base_joint_logits = self.base_joint_head(base_joint_task_token_out).squeeze(1)
-        base_x_token_out = x[:, 1:2, :]
-        base_x_logits = self.base_x_head(base_x_token_out).squeeze(1)
-        base_y_token_out = x[:, 2:3, :]
-        base_y_logits = self.base_y_head(base_y_token_out).squeeze(1)
-        return base_joint_logits, base_x_logits, base_y_logits
+
+        base_joint_token = x[:, 0:1, :]
+        base_x_token     = x[:, 1:2, :]
+        base_y_token     = x[:, 2:3, :]
+
+        base_joint_sincos = self.base_joint_head(base_joint_token).squeeze(1)  # [B,2]
+        base_x = self.base_x_head(base_x_token).squeeze(1).squeeze(-1)         # [B]
+        base_y = self.base_y_head(base_y_token).squeeze(1).squeeze(-1)         # [B]
+        return base_joint_sincos, base_x, base_y

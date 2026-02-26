@@ -22,7 +22,7 @@ from train_token_x_y_rot_dinov3_reg import (
     normalize_2d,
 )
 
-def half_pixels_resize_and_pad(img, s=np.sqrt(0.25)):
+def half_pixels_resize_and_pad(img, s=1):
     if hasattr(img, "size"):  # PIL Image
         new_w = round(img.width * s)
         new_h = round(img.height * s)
@@ -143,6 +143,9 @@ def run_inference(args):
     print("Running inference (regression) ...")
     for batch_i, (images, joint_values) in enumerate(tqdm(dataloader)):
         images = images.to(device)
+
+        if batch_i == 0:
+            print("Image size after transform:", images.shape)
 
         # --- GT ---
         gt_theta_deg = joint_values["base_joint"].to(device).to(torch.float32)  # degrees in [0,180)
@@ -324,12 +327,12 @@ def run_inference(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inference (regression) for EndEffectorPosePredToken (DINOv3)")
-    parser.add_argument("--checkpoint", type=str, help="Path to model checkpoint (.pt)", default="/home/wilah/workspace/EndEffectorTrackingNN/training/dinov3_base_reg_x_y_rot_quarter_res/model_checkpoint.pt")
+    parser.add_argument("--checkpoint", type=str, help="Path to model checkpoint (.pt)", default="/home/wilah/workspace/EndEffectorTrackingNN/training/dinov3_base_reg_x_y_rot_full_res/model_checkpoint.pt")
     parser.add_argument("--dinov3_size", type=str, choices=["dinov3_vitb16", "dinov3_vitl16", "dinov3_vits16"], help="DINOv3 backbone size", default="dinov3_vitb16")
     parser.add_argument("--dataset", type=str, help="Path to dataset folder (same structure as training)", default="/home/wilah/datasets/heshan_october_grapple_data")
-    parser.add_argument("--output_dir", type=str, help="Output folder for results", default="results_inference_with_data_aug_reg/dinov3_base_reg_x_y_rot_test_infer_script_quarter_res")
+    parser.add_argument("--output_dir", type=str, help="Output folder for results", default="results_inference_with_data_aug_reg/dinov3_base_reg_x_y_rot_full_res_new")
     parser.add_argument("--precision", type=float, default=1.0, help="Ground truth precision used in dataset")
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--top_n", type=int, default=30, help="Number of worst/best predictions to save")
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--top_crop", type=int, default=1)

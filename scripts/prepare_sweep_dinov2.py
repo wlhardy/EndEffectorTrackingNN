@@ -7,7 +7,7 @@ GT_PRECISION = 1 # Degrees that the GT will be rounded to (e.g. if set to 5, the
 EPOCHS = 10
 LEARNING_RATE_MIN = 1e-6
 LEARNING_RATE_MAX = 5e-5
-BACKBONE = 'dinov3_vitb16'
+BACKBONE = 'dinov2_vitb14'
 NUM_CLASSES = math.ceil(360 / GT_PRECISION)
 RANDOM_SEED = 42
 LABEL_SMOOTHING_MAX = 0.05
@@ -24,7 +24,7 @@ TARGET_BATCH_SIZE = [4]
 FREEZE_POS_EMBED = False
 FREEZE_PATCH_EMBED = False
 XY_BIN_NBR = 100
-MAIN_TRAIN_FOLDER = "./datasets/train_subset"
+MAIN_TRAIN_FOLDER = "./datasets/train"
 VAL_TRAIN_FOLDER = "./datasets/val"
 
 sweep_config = {
