@@ -448,7 +448,10 @@ def run_inference(args):
                 cams.append((head_name, grayscale_cam[0]))
 
         gt = sd["gt"]
-        uh, uw = sd["unpadded_h"], sd["unpadded_w"]
+        if args.keep_padding:
+            uh, uw = sd["img_np"].shape[0], sd["img_np"].shape[1]
+        else:
+            uh, uw = sd["unpadded_h"], sd["unpadded_w"]
         img_np = sd["img_np"][:uh, :uw]
         n_cols = 1 + len(cams)
         fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 5), facecolor="white")
@@ -456,8 +459,8 @@ def run_inference(args):
             ax.set_facecolor("white")
 
         axes[0].imshow(img_np)
-        gt_x_pix = gt["x"] * img.shape[2] / args.xy_bin_nbr
-        gt_y_pix = gt["y"] * img.shape[1] / args.xy_bin_nbr
+        gt_x_pix = gt["x"] * uw / args.xy_bin_nbr
+        gt_y_pix = gt["y"] * uh / args.xy_bin_nbr
         axes[0].scatter(
             gt_x_pix,
             gt_y_pix,
@@ -467,8 +470,8 @@ def run_inference(args):
             label="GT",
         )
         axes[0].scatter(
-            sd["pred_x_pix"],
-            sd["pred_y_pix"],
+            sd["pred_x_pix"] * uw / img.shape[2],
+            sd["pred_y_pix"] * uh / img.shape[1],
             c="red",
             s=40,
             marker="x",
@@ -476,7 +479,7 @@ def run_inference(args):
         )
         axes[0].legend(
             loc="lower right",
-            fontsize=16,
+            fontsize=18,
             frameon=True,
             edgecolor="black",
             framealpha=0.8,
@@ -486,7 +489,7 @@ def run_inference(args):
         for ax_i, (head_name, cam_map) in enumerate(cams):
             overlay = show_cam_on_image(img_np, cam_map[:uh, :uw], use_rgb=True)
             axes[ax_i + 1].imshow(overlay)
-            axes[ax_i + 1].set_title(head_name, fontsize=16)
+            axes[ax_i + 1].set_title(head_name, fontsize=18)
             axes[ax_i + 1].axis("off")
 
         plt.tight_layout()
@@ -679,10 +682,9 @@ if __name__ == "__main__":
     parser.add_argument("--left_crop", type=int, default=398)
     parser.add_argument("--right_crop", type=int, default=856)
     parser.add_argument(
-        "--xy_bin_nbr",
-        type=int,
-        default=100,
-        help="Number of bins for x and y position",
+        "--keep_padding",
+        action="store_true",
+        help="Do not crop away zero-padding from GradCAM subfigures (show full padded image)",
     )
     args = parser.parse_args()
 
