@@ -27,10 +27,10 @@ from train_token_x_y_rot_dinov3_reg import (
 )
 
 
-def half_pixels_resize_and_pad(img, s=np.sqrt(0.5)):
+def half_pixels_resize_and_pad(img, scale):
     if hasattr(img, "size"):  # PIL Image
-        new_w = round(img.width * s)
-        new_h = round(img.height * s)
+        new_w = round(img.width * scale)
+        new_h = round(img.height * scale)
         img = TF.resize(
             img,
             (new_h, new_w),
@@ -40,8 +40,8 @@ def half_pixels_resize_and_pad(img, s=np.sqrt(0.5)):
         cur_w, cur_h = img.size
     else:  # Tensor (C,H,W)
         _, h, w = img.shape
-        new_h = round(h * s)
-        new_w = round(w * s)
+        new_h = round(h * scale)
+        new_w = round(w * scale)
         img = TF.resize(
             img,
             (new_h, new_w),
@@ -117,6 +117,18 @@ def run_inference(args):
     ee_model.load_state_dict(ckpt["model_state_dict"])
     ee_model.eval()
 
+    resolution_factor = Path(args.checkpoint).parent.name.split("_")[-1]
+    if resolution_factor == "full":
+        resolution_factor = np.sqrt(1.0)
+    elif resolution_factor == "half":
+        resolution_factor = np.sqrt(0.5)
+    elif resolution_factor == "quarter":
+        resolution_factor = np.sqrt(0.25)
+    elif resolution_factor == "eighth":
+        resolution_factor = np.sqrt(0.125)
+    else:
+        raise NotImplementedError()
+
     # === Dataset (same preprocessing as validation in training) ===
     transform_val = T.Compose(
         [
@@ -130,7 +142,7 @@ def run_inference(args):
                     width=img.width - args.right_crop,
                 )
             ),
-            T.Lambda(half_pixels_resize_and_pad),
+            T.Lambda(lambda img: half_pixels_resize_and_pad(img, scale=resolution_factor)),
             T.ToTensor(),
         ]
     )
@@ -141,7 +153,6 @@ def run_inference(args):
         joint_csv_paths=joint_csvs,
         xy_csv_paths=xy_csvs,
         joint_precision=args.precision,
-        xy_bin_nbr=args.xy_bin_nbr,
         transform=transform_val,
     )
     # === Select indices based on mode ===
@@ -174,15 +185,15 @@ def run_inference(args):
             [
                 "idx",
                 "angular_error_deg",
-                "x_error_bins",
-                "y_error_bins",
+                "x_error_norms",
+                "y_error_norms",
                 "total_error",
                 "gt_base_joint_deg",
                 "pred_base_joint_deg",
-                "gt_x_bin",
-                "pred_x_bin_float",
-                "gt_y_bin",
-                "pred_y_bin_float",
+                "gt_x_norm",
+                "pred_x_norm",
+                "gt_y_norm",
+                "pred_y_norm",
                 "pred_sin2theta",
                 "pred_cos2theta",
             ]
@@ -200,12 +211,8 @@ def run_inference(args):
         gt_theta_deg = (
             joint_values["base_joint"].to(device).to(torch.float32)
         )  # degrees in [0,180)
-        gt_x_bin = joint_values["x"].to(device).to(torch.float32)  # integer bins
-        gt_y_bin = joint_values["y"].to(device).to(torch.float32)
-
-        # training reg uses x/100 and y/100 as targets
-        gt_x_norm = gt_x_bin / float(args.xy_bin_nbr)
-        gt_y_norm = gt_y_bin / float(args.xy_bin_nbr)
+        gt_x_norm = joint_values["x"].to(device).to(torch.float32)
+        gt_y_norm = joint_values["y"].to(device).to(torch.float32)
 
         # --- Pred ---
         pred_sincos, pred_x_norm, pred_y_norm = ee_model(images)
@@ -216,8 +223,8 @@ def run_inference(args):
         pred_x_norm = pred_x_norm.view(-1)
         pred_y_norm = pred_y_norm.view(-1)
         gt_theta_deg = gt_theta_deg.view(-1)
-        gt_x_bin = gt_x_bin.view(-1)
-        gt_y_bin = gt_y_bin.view(-1)
+        gt_x_norm = gt_x_norm.view(-1)
+        gt_y_norm = gt_y_norm.view(-1)
 
         # Normalize the (sin, cos) vector to unit length before decoding.
         pred_sincos = normalize_2d(pred_sincos)
@@ -230,13 +237,10 @@ def run_inference(args):
 
         angular_error = torch.abs(ang_error_deg_period180(theta_pred_deg, gt_theta_deg))
 
-        # Compare x/y in bin units for interpretability
-        pred_x_bin = pred_x_norm * float(args.xy_bin_nbr)
-        pred_y_bin = pred_y_norm * float(args.xy_bin_nbr)
-        x_error_bins = torch.abs(pred_x_bin - gt_x_bin)
-        y_error_bins = torch.abs(pred_y_bin - gt_y_bin)
+        x_error_norms = torch.abs(pred_x_norm - gt_x_norm)
+        y_error_norms = torch.abs(pred_y_norm - gt_y_norm)
 
-        total_error = angular_error + x_error_bins + y_error_bins
+        total_error = angular_error + x_error_norms + y_error_norms
 
         # === Stream results to CSV ===
         with open(csv_path, "a", newline="") as f:
@@ -249,15 +253,15 @@ def run_inference(args):
                     [
                         global_idx,
                         angular_error[j].item(),
-                        x_error_bins[j].item(),
-                        y_error_bins[j].item(),
+                        x_error_norms[j].item(),
+                        y_error_norms[j].item(),
                         err_val,
                         gt_theta_deg[j].item(),
                         theta_pred_deg[j].item(),
-                        gt_x_bin[j].item(),
-                        pred_x_bin[j].item(),
-                        gt_y_bin[j].item(),
-                        pred_y_bin[j].item(),
+                        gt_x_norm[j].item(),
+                        pred_x_norm[j].item(),
+                        gt_y_norm[j].item(),
+                        pred_y_norm[j].item(),
                         pred_sincos[j, 0].item(),
                         pred_sincos[j, 1].item(),
                     ]
@@ -303,7 +307,7 @@ def run_inference(args):
     # One wrapper per prediction head
     wrapped_heads = [
         (
-            "Angle (deg)",
+            "Angle",
             ModelOutputWrapper(ee_model, _decode_angle_deg),
         ),
         # (
@@ -321,7 +325,7 @@ def run_inference(args):
         #     ),
         # ),
         (
-            "Position (px)",
+            "Position",
             ModelOutputWrapper(
                 ee_model,
                 lambda o: (o[1] + o[2]).view(-1, 1),
@@ -379,8 +383,8 @@ def run_inference(args):
                 "pred_y_pix": pred_y_norm_s.item() * img.shape[1],
                 # GT tensors for loss-based GradCAM
                 "gt_theta_deg": float(gt["base_joint"]),
-                "gt_x_norm": float(gt["x"]) / args.xy_bin_nbr,
-                "gt_y_norm": float(gt["y"]) / args.xy_bin_nbr,
+                "gt_x_norm": float(gt["x"]),
+                "gt_y_norm": float(gt["y"]),
             }
         )
 
@@ -447,6 +451,7 @@ def run_inference(args):
                 )
                 cams.append((head_name, grayscale_cam[0]))
 
+        # TODO ground truth and preds should be adjusted according to cropping and padding, both for training and inference
         gt = sd["gt"]
         if args.keep_padding:
             uh, uw = sd["img_np"].shape[0], sd["img_np"].shape[1]
@@ -459,8 +464,8 @@ def run_inference(args):
             ax.set_facecolor("white")
 
         axes[0].imshow(img_np)
-        gt_x_pix = gt["x"] * uw / args.xy_bin_nbr
-        gt_y_pix = gt["y"] * uh / args.xy_bin_nbr
+        gt_x_pix = gt["x"] * uw
+        gt_y_pix = gt["y"] * uh
         axes[0].scatter(
             gt_x_pix,
             gt_y_pix,

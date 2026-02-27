@@ -31,7 +31,7 @@ def euclidean_position_error(
     pred_x: np.ndarray,
     pred_y: np.ndarray,
 ) -> np.ndarray:
-    """Euclidean distance between ground-truth and predicted (x, y) positions (in bins)."""
+    """Euclidean distance between ground-truth and predicted (x, y) positions (in percentage)."""
     return np.sqrt((gt_x - pred_x) ** 2 + (gt_y - pred_y) ** 2)
 
 
@@ -40,19 +40,19 @@ def print_stats(name: str, errors: np.ndarray) -> None:
     print(f" {name}: {mean:.2f}$_{{\\pm{std:.2f}}}$ & {max_:.2f}")
 
 
-# RESULT_FILES = [
-#     "dinov3_results/dinov2_base_reg_x_y_rot_half",
-#     "dinov3_results/dinov3_small_reg_x_y_rot_half",
-#     "dinov3_results/dinov3_base_reg_x_y_rot_half",
-#     "dinov3_results/dinov3_large_reg_x_y_rot_half",
-# ]
-
 RESULT_FILES = [
-    # "dinov3_results/dinov3_base_reg_x_y_rot_full", # TODO
-    "dinov3_results/dinov3_base_reg_x_y_rot_half",
-    "dinov3_results/dinov3_base_reg_x_y_rot_quarter",
-    "dinov3_results/dinov3_base_reg_x_y_rot_eighth",
+    # "outputs/dinov2_base_reg_x_y_rot_half_stats", # TODO
+    "outputs/dinov3_small_reg_x_y_rot_half_stats",
+    "outputs/dinov3_base_reg_x_y_rot_half_stats",
+    "outputs/dinov3_large_reg_x_y_rot_half_stats",
 ]
+
+# RESULT_FILES = [
+#     "outputs/dinov3_base_reg_x_y_rot_full_stats",
+#     "outputs/dinov3_base_reg_x_y_rot_half_stats",
+#     "outputs/dinov3_base_reg_x_y_rot_quarter_stats",
+#     "outputs/dinov3_base_reg_x_y_rot_eighth_stats",
+# ]
 
 
 def process(path: str) -> None:
@@ -72,10 +72,10 @@ def process(path: str) -> None:
 
     gt_angle   = data["gt_base_joint_deg"]
     pred_angle = data["pred_base_joint_deg"]
-    gt_x       = data["gt_x_bin"]
-    gt_y       = data["gt_y_bin"]
-    pred_x     = data["pred_x_bin_float"]
-    pred_y     = data["pred_y_bin_float"]
+    gt_x       = data["gt_x_norm"] * 100
+    gt_y       = data["gt_y_norm"] * 100
+    pred_x     = data["pred_x_norm"] * 100
+    pred_y     = data["pred_y_norm"] * 100
 
     # --- Angle error ---
     angle_errors = angular_error_period180(gt_angle, pred_angle)
@@ -83,7 +83,7 @@ def process(path: str) -> None:
 
     # --- Position error ---
     pos_errors = euclidean_position_error(gt_x, gt_y, pred_x, pred_y)
-    print_stats("Position Error (Euclidean, in bins)", pos_errors)
+    print_stats("Position Error (Euclidean, in percentage)", pos_errors)
 
 
 if __name__ == "__main__":
