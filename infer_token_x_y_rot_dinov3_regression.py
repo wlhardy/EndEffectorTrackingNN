@@ -22,7 +22,7 @@ from train_token_x_y_rot_dinov3_reg import (
     normalize_2d,
 )
 
-def half_pixels_resize_and_pad(img, s=1):
+def half_pixels_resize_and_pad(img, s=np.sqrt(1)):
     if hasattr(img, "size"):  # PIL Image
         new_w = round(img.width * s)
         new_h = round(img.height * s)
