@@ -453,19 +453,26 @@ def run_inference(args):
 
         # TODO ground truth and preds should be adjusted according to cropping and padding, both for training and inference
         gt = sd["gt"]
-        if args.keep_padding:
-            uh, uw = sd["img_np"].shape[0], sd["img_np"].shape[1]
-        else:
-            uh, uw = sd["unpadded_h"], sd["unpadded_w"]
+        uh, uw = sd["unpadded_h"], sd["unpadded_w"]
         img_np = sd["img_np"][:uh, :uw]
         n_cols = 1 + len(cams)
         fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 5), facecolor="white")
         for ax in axes:
             ax.set_facecolor("white")
 
+        # Hardcoded for simplicity, won't be necessary when TODO above is addressed
+        crop_adjust_x_left = 398 / 1920
+        crop_adjust_x = (1920 - 856) / 1920
+        crop_adjust_y_top = 1 / 1080
+        crop_adjust_y = (1080 - 2) / 1080
+
+        # This won't be necessary when TODO above is addressed
+        gt_x_pix = (gt["x"] - crop_adjust_x_left) / crop_adjust_x * uw
+        gt_y_pix = (gt["y"] - crop_adjust_y_top) / crop_adjust_y * uh
+        pred_x_pix = (sd["pred_x_pix"] / img.shape[2] - crop_adjust_x_left) / crop_adjust_x * uw,
+        pred_y_pix = (sd["pred_y_pix"] / img.shape[1] - crop_adjust_y_top) / crop_adjust_y * uh,
+
         axes[0].imshow(img_np)
-        gt_x_pix = gt["x"] * uw
-        gt_y_pix = gt["y"] * uh
         axes[0].scatter(
             gt_x_pix,
             gt_y_pix,
@@ -475,8 +482,8 @@ def run_inference(args):
             label="GT",
         )
         axes[0].scatter(
-            sd["pred_x_pix"] * uw / img.shape[2],
-            sd["pred_y_pix"] * uh / img.shape[1],
+            pred_x_pix,
+            pred_y_pix,
             c="red",
             s=40,
             marker="x",
