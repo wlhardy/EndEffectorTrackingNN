@@ -194,6 +194,8 @@ def train(config=None):
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             print(f"Using device: {device}")
 
+            autocast_ctx = torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16)
+
             # Load DINOv3
             backbone_model = torch.hub.load(DINOV3_REPO_DIR, config.backbone, source='local', weights=DINO_CHECKPOINT_DICT[config.backbone], force_reload=False)
             for param in backbone_model.parameters():
@@ -288,7 +290,8 @@ def train(config=None):
 
                     images = images.to(device)
 
-                    base_joint_sincos, base_x, base_y = ee_model(images)
+                    with autocast_ctx:
+                        base_joint_sincos, base_x, base_y = ee_model(images)
                     base_joint_sincos = normalize_2d(base_joint_sincos)
 
                     # Compute loss
@@ -415,7 +418,8 @@ def train(config=None):
 
                             images = images.to(device)
 
-                            base_joint_sincos, base_x, base_y = ee_model(images)
+                            with autocast_ctx:
+                                base_joint_sincos, base_x, base_y = ee_model(images)
 
                             base_x_preds = base_x
                             base_y_preds = base_y
@@ -494,8 +498,10 @@ if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Train EndEffectorPosePrediction Model with Token-based Architecture")
     parser.add_argument("--sweep", type=str, help="Sweep ID to use for hyperparameter optimization", required=True)
+    parser.add_argument("--bf16", action="store_true", help="Enable BF16 mixed precision training")
     args = parser.parse_args()
     sweep_id = args.sweep
+    use_bf16 = args.bf16
     print(sweep_id)
 
     api_key = os.environ.get("WANDB_API_KEY")
