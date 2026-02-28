@@ -41,7 +41,7 @@ def print_stats(name: str, errors: np.ndarray) -> None:
 
 
 RESULT_FILES = [
-    # "outputs/dinov2_base_reg_x_y_rot_half_stats", # TODO
+    "outputs/dinov2_base_reg_x_y_rot_half_stats",
     "outputs/dinov3_small_reg_x_y_rot_half_stats",
     "outputs/dinov3_base_reg_x_y_rot_half_stats",
     "outputs/dinov3_large_reg_x_y_rot_half_stats",
