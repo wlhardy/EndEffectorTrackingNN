@@ -65,7 +65,6 @@ def run_inference(args):
         joint_csv_paths=joint_csvs,
         xy_csv_paths=xy_csvs,
         joint_precision=args.precision,
-        xy_bin_nbr=args.xy_bin_nbr,
         transform=transform_val,
     )
 
@@ -90,15 +89,15 @@ def run_inference(args):
         writer.writerow([
             "idx",
             "angular_error_deg",
-            "x_error_bins",
-            "y_error_bins",
+            "x_error_norms",
+            "y_error_norms",
             "total_error",
             "gt_base_joint_deg",
             "pred_base_joint_deg",
-            "gt_x_bin",
-            "pred_x_bin_float",
-            "gt_y_bin",
-            "pred_y_bin_float",
+            "gt_x_norm",
+            "pred_x_norm",
+            "gt_y_norm",
+            "pred_y_norm",
             "pred_sin2theta",
             "pred_cos2theta",
         ])
@@ -115,12 +114,8 @@ def run_inference(args):
         images = images.to(device)
 
         gt_theta_deg = joint_values["base_joint"].to(device).float()
-        gt_x_bin = joint_values["x"].to(device).float()
-        gt_y_bin = joint_values["y"].to(device).float()
-
-        # Normalize GT same as training
-        gt_x_norm = gt_x_bin / float(args.xy_bin_nbr)
-        gt_y_norm = gt_y_bin / float(args.xy_bin_nbr)
+        gt_x_norm = joint_values["x"].to(device).to(torch.float32)
+        gt_y_norm = joint_values["y"].to(device).to(torch.float32)
 
         # === Forward ===
         pred_sincos, pred_x_norm, pred_y_norm = ee_model(images)
@@ -130,8 +125,8 @@ def run_inference(args):
         pred_x_norm = pred_x_norm.view(-1)
         pred_y_norm = pred_y_norm.view(-1)
         gt_theta_deg = gt_theta_deg.view(-1)
-        gt_x_bin = gt_x_bin.view(-1)
-        gt_y_bin = gt_y_bin.view(-1)
+        gt_x_norm = gt_x_norm.view(-1)
+        gt_y_norm = gt_y_norm.view(-1)
 
         # Normalize sin/cos vector
         pred_sincos = normalize_2d(pred_sincos)
@@ -148,13 +143,10 @@ def run_inference(args):
         )
 
         # Convert back to bins for interpretability
-        pred_x_bin = pred_x_norm * float(args.xy_bin_nbr)
-        pred_y_bin = pred_y_norm * float(args.xy_bin_nbr)
+        x_error_norms = torch.abs(pred_x_norm - gt_x_norm)
+        y_error_norms = torch.abs(pred_y_norm - gt_y_norm)
 
-        x_error_bins = torch.abs(pred_x_bin - gt_x_bin)
-        y_error_bins = torch.abs(pred_y_bin - gt_y_bin)
-
-        total_error = torch.abs(angular_error) + x_error_bins + y_error_bins
+        total_error = angular_error + x_error_norms + y_error_norms
 
         # === Stream results ===
         with open(csv_path, "a", newline="") as f:
@@ -167,15 +159,15 @@ def run_inference(args):
                 writer.writerow([
                     global_idx,
                     angular_error[j].item(),
-                    x_error_bins[j].item(),
-                    y_error_bins[j].item(),
+                    x_error_norms[j].item(),
+                    y_error_norms[j].item(),
                     err_val,
                     gt_theta_deg[j].item(),
                     theta_pred_deg[j].item(),
-                    gt_x_bin[j].item(),
-                    pred_x_bin[j].item(),
-                    gt_y_bin[j].item(),
-                    pred_y_bin[j].item(),
+                    gt_x_norm[j].item(),
+                    pred_x_norm[j].item(),
+                    gt_y_norm[j].item(),
+                    pred_y_norm[j].item(),
                     pred_sincos[j, 0].item(),
                     pred_sincos[j, 1].item(),
                 ])
@@ -222,7 +214,6 @@ def run_inference(args):
             pred_x=pred_x_pix,
             pred_y=pred_y_pix,
             pred_angle=theta_pred_deg,
-            nbr_bins_xy=args.xy_bin_nbr,
         )
 
     print("Inference complete.")
@@ -250,7 +241,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="results_inference_with_data_aug_reg/dinov2_base_reg_x_y_rot_half_res",
+        default="results_inference_with_data_aug_reg/dinov2_base_reg_x_y_rot_half_res_updated",
         help="Output folder for results",
     )
 
@@ -264,7 +255,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=1,
+        default=4,
     )
 
     parser.add_argument(
@@ -277,20 +268,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_workers",
         type=int,
-        default=2,
+        default=4,
     )
 
     parser.add_argument("--top_crop", type=int, default=1)
     parser.add_argument("--bottom_crop", type=int, default=2)
     parser.add_argument("--left_crop", type=int, default=398)
     parser.add_argument("--right_crop", type=int, default=856)
-
-    parser.add_argument(
-        "--xy_bin_nbr",
-        type=int,
-        default=100,
-        help="Number of bins for x and y position",
-    )
 
     args = parser.parse_args()
 

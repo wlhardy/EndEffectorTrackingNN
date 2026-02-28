@@ -42,7 +42,7 @@ def class_to_angle(class_idx, precision, symmetric=False, center=False):
 
 class EEFDataset(Dataset):
     def __init__(self, image_dirs, joint_csv_paths, xy_csv_paths=None,
-                 joint_precision=1, xy_bin_nbr=100, transform=None, cache_dir=".cache"):
+                 joint_precision=1, transform=None, cache_dir=".cache"):
 
         if isinstance(image_dirs, str):
             image_dirs = [image_dirs]
@@ -56,7 +56,6 @@ class EEFDataset(Dataset):
         self.image_dirs = image_dirs
         self.joint_precision = joint_precision
         self.transform = transform
-        self.xy_bin_nbr = xy_bin_nbr
 
         closest_time_threshold = 5e+7
         time_interval = 6e+10
@@ -67,7 +66,6 @@ class EEFDataset(Dataset):
             "joint_csv_paths": sorted(joint_csv_paths),
             "xy_csv_paths": sorted(xy_csv_paths),
             "joint_precision": self.joint_precision,
-            "xy_bin_nbr": self.xy_bin_nbr,
             "closest_time_threshold": closest_time_threshold,
             "time_interval": time_interval
         }
@@ -175,13 +173,11 @@ class EEFDataset(Dataset):
 
         image = Image.open(img_path).convert("RGB")
         orig_w, orig_h = image.size
-        x_bin = int(joint_values['x'] / orig_w * self.xy_bin_nbr)
-        y_bin = int(joint_values['y'] / orig_h * self.xy_bin_nbr)
         if self.transform:
             image = self.transform(image)
 
-        joint_values['x'] = x_bin
-        joint_values['y'] = y_bin
+        joint_values['x'] /= orig_w
+        joint_values['y'] /= orig_h
         return image, joint_values
 
     def save_to_csv(self, save_path):
