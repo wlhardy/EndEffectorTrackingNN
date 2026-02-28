@@ -25,6 +25,10 @@ import model_token_dinov3_reg
 
 matplotlib.use("Agg")
 
+os.environ["TORCH_HOME"] = os.path.expanduser("~/.cache2/torch")
+torch.hub.set_dir(os.environ["TORCH_HOME"])
+os.makedirs(os.environ["TORCH_HOME"], exist_ok=True)
+
 DEBUG = 0
 VERBOSE = 0
 COMPUTE_ERROR_IN_TRAINING = True
@@ -88,7 +92,7 @@ def save_debug_image(image_tensor, joint_values, save_path,
     fig.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
 
-def half_pixels_resize_and_pad(img, s=1):
+def half_pixels_resize_and_pad(img, s=np.sqrt(0.125)):
     if hasattr(img, "size"):  # PIL Image
         new_w = round(img.width * s)
         new_h = round(img.height * s)
@@ -232,16 +236,16 @@ def train(config=None):
             os.makedirs(checkpoint_dir, exist_ok=True)
             #target_batch_size = config.target_batch_size
             #batch_size = min(config.max_batch_size, target_batch_size)
-            target_batch_size = 4
-            batch_size = 4
+            target_batch_size = 8
+            batch_size = 8
             accumulation_steps = max(1, target_batch_size // batch_size)
 
             weight_loss_joints = config.weight_ratio_joints
             weight_loss_xy = 1.0 - weight_loss_joints
 
             cpu_count = multiprocessing.cpu_count()
-            train_cpu_count = min(20, cpu_count)
-            val_cpu_count = min(20, cpu_count)
+            train_cpu_count = min(12, cpu_count)
+            val_cpu_count = min(12, cpu_count)
             dataloader_train = DataLoader(dataset_train, batch_size=batch_size, num_workers=train_cpu_count, shuffle=True, persistent_workers=True)
 
             if RUN_VALIDATION:
@@ -261,6 +265,10 @@ def train(config=None):
                 running_loss_interval = 0.0
                 running_loss_joints_interval = 0.0
                 running_loss_pixel_interval = 0.0
+                angular_error_interval = 0.0
+                x_error_interval = 0.0
+                y_error_interval = 0.0
+                samples_interval = 0
 
                 for i, (images, joint_values) in enumerate(tqdm.tqdm(dataloader_train, desc=f"Epoch {epoch+1}/{config.epochs}")):
                     # Start a timer to measure the training step duration
@@ -312,11 +320,17 @@ def train(config=None):
                         avg_loss_interval = running_loss_interval / log_interval
                         avg_loss_joints_interval = running_loss_joints_interval / log_interval
                         avg_loss_pixel_interval = running_loss_pixel_interval / log_interval
+                        mean_ae_interval = angular_error_interval / samples_interval
+                        mean_x_interval = x_error_interval / samples_interval
+                        mean_y_interval = y_error_interval / samples_interval
 
                         wandb.log({
                             "train_batch_loss": avg_loss_interval,
                             "train_batch_loss_joints": avg_loss_joints_interval,
                             "train_batch_loss_pixel": avg_loss_pixel_interval,
+                            "train_batch_angular_error": mean_ae_interval,
+                            "train_batch_x_error": mean_x_interval,
+                            "train_batch_y_error": mean_y_interval,
                             "epoch": epoch + 1,
                             "batch": i + 1,
                             "learning_rate": optimizer.param_groups[0]["lr"],
@@ -364,6 +378,10 @@ def train(config=None):
                         y_error = torch.abs(base_y_preds - base_y_gt)
                         x_error_bin_total += x_error.sum().item()
                         y_error_bin_total += y_error.sum().item()
+                        angular_error_interval += torch.abs(angular_error_base_joint).sum().item()
+                        x_error_interval += x_error.sum().item()
+                        y_error_interval += y_error.sum().item()
+                        samples_interval += images.size(0)
 
                         if DEBUG > 0:
                             if (i % 5 == 0) and (images.size(0) > 0):
