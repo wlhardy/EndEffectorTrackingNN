@@ -13,7 +13,7 @@ import heapq
 
 import eefdataset
 import model_token_dinov2
-from train_token_x_y_rot import save_debug_image, half_pixels_resize_and_pad, discover_dataset_folders
+from train_token_x_y_rot_dinov2 import save_debug_image, half_pixels_resize_and_pad, discover_dataset_folders
 
 DINOV3_REPO_DIR = "dinov3"
 
