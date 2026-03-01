@@ -4,6 +4,7 @@ import heapq
 import os
 from pathlib import Path
 
+import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import numpy as np
 import pytorch_grad_cam
@@ -11,6 +12,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms.v2 as T
 import torchvision.transforms.v2.functional as TF
+from matplotlib.lines import Line2D
 from pytorch_grad_cam.utils.image import show_cam_on_image
 from pytorch_grad_cam.utils.model_targets import RawScoresOutputTarget
 from torchvision.transforms.v2 import InterpolationMode
@@ -142,7 +144,9 @@ def run_inference(args):
                     width=img.width - args.right_crop,
                 )
             ),
-            T.Lambda(lambda img: half_pixels_resize_and_pad(img, scale=resolution_factor)),
+            T.Lambda(
+                lambda img: half_pixels_resize_and_pad(img, scale=resolution_factor)
+            ),
             T.ToTensor(),
         ]
     )
@@ -311,14 +315,14 @@ def run_inference(args):
             ModelOutputWrapper(ee_model, _decode_angle_deg),
         ),
         # (
-        #     "x_pos",
+        #     "Position (x)",
         #     ModelOutputWrapper(
         #         ee_model,
         #         lambda o: o[1].view(-1, 1),
         #     ),
         # ),
         # (
-        #     "y_pos",
+        #     "Position (y)",
         #     ModelOutputWrapper(
         #         ee_model,
         #         lambda o: o[2].view(-1, 1),
@@ -369,8 +373,12 @@ def run_inference(args):
         col_max = img_np_full.max(axis=(0, 2))
         nonzero_rows = np.where(row_max > 0)[0]
         nonzero_cols = np.where(col_max > 0)[0]
-        unpadded_h = int(nonzero_rows[-1]) + 1 if len(nonzero_rows) else img_np_full.shape[0]
-        unpadded_w = int(nonzero_cols[-1]) + 1 if len(nonzero_cols) else img_np_full.shape[1]
+        unpadded_h = (
+            int(nonzero_rows[-1]) + 1 if len(nonzero_rows) else img_np_full.shape[0]
+        )
+        unpadded_w = (
+            int(nonzero_cols[-1]) + 1 if len(nonzero_cols) else img_np_full.shape[1]
+        )
         sample_data.append(
             {
                 "img": img,
@@ -469,40 +477,89 @@ def run_inference(args):
         # This won't be necessary when TODO above is addressed
         gt_x_pix = (gt["x"] - crop_adjust_x_left) / crop_adjust_x * uw
         gt_y_pix = (gt["y"] - crop_adjust_y_top) / crop_adjust_y * uh
-        pred_x_pix = (sd["pred_x_pix"] / img.shape[2] - crop_adjust_x_left) / crop_adjust_x * uw,
-        pred_y_pix = (sd["pred_y_pix"] / img.shape[1] - crop_adjust_y_top) / crop_adjust_y * uh,
+        pred_x_pix = (
+            (sd["pred_x_pix"] / img.shape[2] - crop_adjust_x_left) / crop_adjust_x * uw,
+        )
+        pred_y_pix = (
+            (sd["pred_y_pix"] / img.shape[1] - crop_adjust_y_top) / crop_adjust_y * uh,
+        )
+
+        fontsize = 20
 
         axes[0].imshow(img_np)
         axes[0].scatter(
             gt_x_pix,
             gt_y_pix,
             c="lime",
-            s=40,
+            s=120,
             marker="o",
-            label="GT",
+            edgecolors="black",
+            linewidths=1.5,
         )
-        axes[0].scatter(
+        pred_sc = axes[0].scatter(
             pred_x_pix,
             pred_y_pix,
             c="red",
-            s=40,
+            s=120,
             marker="x",
+            linewidths=2.0,
+        )
+        pred_sc.set_path_effects([pe.withStroke(linewidth=4, foreground="black")])
+        _gt_handle = Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="None",
+            color="w",
+            markerfacecolor="lime",
+            markeredgecolor="black",
+            markeredgewidth=1.5,
+            markersize=10,
+            label="GT",
+        )
+        _pred_handle = Line2D(
+            [0],
+            [0],
+            marker="x",
+            linestyle="None",
+            color="red",
+            markeredgewidth=2.0,
+            markersize=10,
             label="Pred",
         )
+        _pred_handle.set_path_effects([pe.withStroke(linewidth=4, foreground="black")])
         axes[0].legend(
+            handles=[_gt_handle, _pred_handle],
             loc="lower right",
-            fontsize=18,
+            fontsize=fontsize,
             frameon=True,
             edgecolor="black",
             framealpha=0.8,
+            handlelength=1.0,
+            handletextpad=0.4,
+            borderpad=0.4,
+            labelspacing=0.3,
         )
         axes[0].axis("off")
 
         for ax_i, (head_name, cam_map) in enumerate(cams):
             overlay = show_cam_on_image(img_np, cam_map[:uh, :uw], use_rgb=True)
-            axes[ax_i + 1].imshow(overlay)
-            axes[ax_i + 1].set_title(head_name, fontsize=18)
-            axes[ax_i + 1].axis("off")
+            ax = axes[ax_i + 1]
+            ax.imshow(overlay)
+            ax.text(
+                0.5,
+                0.02,
+                head_name,
+                transform=ax.transAxes,
+                fontsize=fontsize,
+                color="white",
+                ha="center",
+                va="bottom",
+                path_effects=[
+                    pe.withStroke(linewidth=3, foreground="black"),
+                ],
+            )
+            ax.axis("off")
 
         plt.tight_layout()
         plt.savefig(save_path, bbox_inches="tight", pad_inches=0)
