@@ -178,8 +178,9 @@ class EEFDataset(Dataset):
 
         joint_values['x'] /= orig_w
         joint_values['y'] /= orig_h
-        return image, joint_values
+        image_name = os.path.basename(img_path)
+        return image, joint_values, image_name
 
     def save_to_csv(self, save_path):
-        df = pd.DataFrame([{'image_path': img, **vals} for img, vals in self.data])
+        df = pd.DataFrame([{'image_path': img, **vals} for img, vals, _ in self.data])
         df.to_csv(save_path, index=False)
