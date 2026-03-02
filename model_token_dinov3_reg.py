@@ -61,6 +61,7 @@ class EndEffectorPosePredToken(nn.Module):
             nn.Linear(embed_dim // 2, embed_dim // 2),
             nn.ReLU(),
             nn.Linear(embed_dim // 2, 1),
+            nn.Sigmoid()
         )
         self.base_y_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim // 2),
@@ -68,6 +69,7 @@ class EndEffectorPosePredToken(nn.Module):
             nn.Linear(embed_dim // 2, embed_dim // 2),
             nn.ReLU(),
             nn.Linear(embed_dim // 2, 1),
+            nn.Sigmoid()
         )
 
         self.norm = self.backbone.norm

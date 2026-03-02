@@ -22,7 +22,7 @@ from train_token_x_y_rot_dinov3_reg import (
     normalize_2d,
 )
 
-def half_pixels_resize_and_pad(img, s=np.sqrt(1)):
+def half_pixels_resize_and_pad(img, s=np.sqrt(0.5)):
     if hasattr(img, "size"):  # PIL Image
         new_w = round(img.width * s)
         new_h = round(img.height * s)
@@ -95,7 +95,6 @@ def run_inference(args):
         joint_csv_paths=joint_csvs,
         xy_csv_paths=xy_csvs,
         joint_precision=args.precision,
-        xy_bin_nbr=args.xy_bin_nbr,
         transform=transform_val,
     )
     dataloader = torch.utils.data.DataLoader(
@@ -118,7 +117,7 @@ def run_inference(args):
         writer = csv.writer(f)
         writer.writerow(
             [
-                "idx",
+                "image_name",
                 "angular_error_deg",
                 "x_error_bins",
                 "y_error_bins",
@@ -141,20 +140,16 @@ def run_inference(args):
     heapq.heapify(best_heap)
 
     print("Running inference (regression) ...")
-    for batch_i, (images, joint_values) in enumerate(tqdm(dataloader)):
+    for batch_i, (images, joint_values, image_names) in enumerate(tqdm(dataloader)):
         images = images.to(device)
 
         if batch_i == 0:
             print("Image size after transform:", images.shape)
 
         # --- GT ---
-        gt_theta_deg = joint_values["base_joint"].to(device).to(torch.float32)  # degrees in [0,180)
-        gt_x_bin = joint_values["x"].to(device).to(torch.float32)  # integer bins
-        gt_y_bin = joint_values["y"].to(device).to(torch.float32)
-
-        # training reg uses x/100 and y/100 as targets
-        gt_x_norm = gt_x_bin / float(args.xy_bin_nbr)
-        gt_y_norm = gt_y_bin / float(args.xy_bin_nbr)
+        gt_theta_deg = joint_values["base_joint"].to(device).to(torch.bfloat16)  # degrees in [0,180)
+        gt_x_norm = joint_values["x"].to(device).to(torch.bfloat16)  # integer bins
+        gt_y_norm = joint_values["y"].to(device).to(torch.bfloat16)
 
         # --- Pred ---
         pred_sincos, pred_x_norm, pred_y_norm = ee_model(images)
@@ -165,8 +160,8 @@ def run_inference(args):
         pred_x_norm = pred_x_norm.view(-1)
         pred_y_norm = pred_y_norm.view(-1)
         gt_theta_deg = gt_theta_deg.view(-1)
-        gt_x_bin = gt_x_bin.view(-1)
-        gt_y_bin = gt_y_bin.view(-1)
+        gt_x_norm = gt_x_norm.view(-1)
+        gt_y_norm = gt_y_norm.view(-1)
 
         # Normalize the (sin, cos) vector to unit length before decoding.
         pred_sincos = normalize_2d(pred_sincos)
@@ -180,12 +175,10 @@ def run_inference(args):
         angular_error = ang_error_deg_period180(theta_pred_deg, gt_theta_deg)
 
         # Compare x/y in bin units for interpretability
-        pred_x_bin = pred_x_norm * float(args.xy_bin_nbr)
-        pred_y_bin = pred_y_norm * float(args.xy_bin_nbr)
-        x_error_bins = torch.abs(pred_x_bin - gt_x_bin)
-        y_error_bins = torch.abs(pred_y_bin - gt_y_bin)
+        x_error_norms = torch.abs(pred_x_norm - gt_x_norm)
+        y_error_norms = torch.abs(pred_y_norm - gt_y_norm)
 
-        total_error = angular_error + x_error_bins + y_error_bins
+        total_error = angular_error + x_error_norms + y_error_norms
 
         # === Stream results to CSV ===
         with open(csv_path, "a", newline="") as f:
@@ -196,17 +189,17 @@ def run_inference(args):
 
                 writer.writerow(
                     [
-                        global_idx,
+                        image_names[j],
                         angular_error[j].item(),
-                        x_error_bins[j].item(),
-                        y_error_bins[j].item(),
+                        x_error_norms[j].item(),
+                        y_error_norms[j].item(),
                         err_val,
                         gt_theta_deg[j].item(),
                         theta_pred_deg[j].item(),
-                        gt_x_bin[j].item(),
-                        pred_x_bin[j].item(),
-                        gt_y_bin[j].item(),
-                        pred_y_bin[j].item(),
+                        gt_x_norm[j].item(),
+                        pred_x_norm[j].item(),
+                        gt_y_norm[j].item(),
+                        pred_y_norm[j].item(),
                         pred_sincos[j, 0].item(),
                         pred_sincos[j, 1].item(),
                     ]
@@ -228,61 +221,11 @@ def run_inference(args):
         del images, pred_sincos, pred_x_norm, pred_y_norm
         torch.cuda.empty_cache()
 
-    # === Sort and save worst ===
-    worst_heap = sorted(worst_heap, key=lambda x: x[0], reverse=True)
-    print(f"Saving {len(worst_heap)} worst predictions ...")
-    for rank, (err_val, sample_idx) in enumerate(worst_heap):
-        img, gt = dataset[sample_idx]
-        img_tensor = img.to(device).unsqueeze(0)
-
-        pred_sincos, pred_x_norm, pred_y_norm = ee_model(img_tensor)
-        pred_sincos = normalize_2d(pred_sincos)
-        phi = torch.atan2(pred_sincos[:, 0], pred_sincos[:, 1])
-        theta_pred_deg = torch.rad2deg(torch.remainder(0.5 * phi, torch.pi))[0].item()
-
-        pred_x_pix = pred_x_norm.item() * img.shape[2]
-        pred_y_pix = pred_y_norm.item() * img.shape[1]
-
-        save_debug_image(
-            img,
-            gt,
-            worst_dir / f"worst_{rank:03d}_idx{sample_idx}_err{err_val:.2f}.png",
-            pred_x=pred_x_pix,
-            pred_y=pred_y_pix,
-            pred_angle=theta_pred_deg,
-            nbr_bins_xy=args.xy_bin_nbr,
-        )
-
-    # === Sort and save best ===
-    best_heap = sorted([(-e, i) for (e, i) in best_heap], key=lambda x: x[0])
-    print(f"Saving {len(best_heap)} best predictions ...")
-    for rank, (err_val, sample_idx) in enumerate(best_heap):
-        img, gt = dataset[sample_idx]
-        img_tensor = img.to(device).unsqueeze(0)
-
-        pred_sincos, pred_x_norm, pred_y_norm = ee_model(img_tensor)
-        pred_sincos = normalize_2d(pred_sincos)
-        phi = torch.atan2(pred_sincos[:, 0], pred_sincos[:, 1])
-        theta_pred_deg = torch.rad2deg(torch.remainder(0.5 * phi, torch.pi))[0].item()
-
-        pred_x_pix = pred_x_norm.item() * img.shape[2]
-        pred_y_pix = pred_y_norm.item() * img.shape[1]
-
-        save_debug_image(
-            img,
-            gt,
-            best_dir / f"best_{rank:03d}_idx{sample_idx}_err{err_val:.2f}.png",
-            pred_x=pred_x_pix,
-            pred_y=pred_y_pix,
-            pred_angle=theta_pred_deg,
-            nbr_bins_xy=args.xy_bin_nbr,
-        )
-
     # === Plot angular error histogram + error vs GT angle ===
     print("Generating plots ...")
-    results = np.loadtxt(csv_path, delimiter=",", skiprows=1)
-    angular_errors = results[:, 1]
-    gt_angles = results[:, 5]
+    results = np.loadtxt(csv_path, delimiter=",", skiprows=1, usecols=(1,12))
+    angular_errors = results[:, 0]
+    gt_angles = results[:, 4]
 
     mean_err = np.mean(angular_errors)
     std_err = np.std(angular_errors)
@@ -327,10 +270,10 @@ def run_inference(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inference (regression) for EndEffectorPosePredToken (DINOv3)")
-    parser.add_argument("--checkpoint", type=str, help="Path to model checkpoint (.pt)", default="/home/wilah/workspace/EndEffectorTrackingNN/training/dinov3_base_reg_x_y_rot_full_res/model_checkpoint.pt")
+    parser.add_argument("--checkpoint", type=str, help="Path to model checkpoint (.pt)", default="/home/wilah/workspace/EndEffectorTrackingNN/training/dinov3_base_reg_x_y_rot_half_res_fixed_x_y/model_checkpoint(1).pt")
     parser.add_argument("--dinov3_size", type=str, choices=["dinov3_vitb16", "dinov3_vitl16", "dinov3_vits16"], help="DINOv3 backbone size", default="dinov3_vitb16")
     parser.add_argument("--dataset", type=str, help="Path to dataset folder (same structure as training)", default="/home/wilah/datasets/heshan_october_grapple_data")
-    parser.add_argument("--output_dir", type=str, help="Output folder for results", default="results_inference_with_data_aug_reg/dinov3_base_reg_x_y_rot_full_res_new")
+    parser.add_argument("--output_dir", type=str, help="Output folder for results", default="results_inference_with_data_aug_reg/dinov3_base_reg_x_y_rot_half_res_fixed_x_y")
     parser.add_argument("--precision", type=float, default=1.0, help="Ground truth precision used in dataset")
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--top_n", type=int, default=30, help="Number of worst/best predictions to save")
@@ -339,7 +282,6 @@ if __name__ == "__main__":
     parser.add_argument("--bottom_crop", type=int, default=2)
     parser.add_argument("--left_crop", type=int, default=398)
     parser.add_argument("--right_crop", type=int, default=856)
-    parser.add_argument("--xy_bin_nbr", type=int, default=100, help="Number of bins for x and y position")
     args = parser.parse_args()
 
     run_inference(args)

@@ -217,7 +217,22 @@ def train(config=None):
 
             # Load model
             ee_model = model_token_dinov3_reg.EndEffectorPosePredToken(backbone_model).to(device)
-            optimizer = torch.optim.AdamW(ee_model.parameters(), lr=config.learning_rate)
+            decay = []
+            no_decay = []
+
+            for name, param in ee_model.named_parameters():
+                if param.ndim == 1 or name.endswith(".bias"):
+                    no_decay.append(param)
+                else:
+                    decay.append(param)
+
+            optimizer = torch.optim.AdamW(
+                [
+                    {"params": decay, "weight_decay": 1e-2},
+                    {"params": no_decay, "weight_decay": 0.0},
+                ],
+                lr=config.learning_rate,
+            )
 
             criterion_joints = nn.MSELoss()
             criterion_pixel = nn.MSELoss()
