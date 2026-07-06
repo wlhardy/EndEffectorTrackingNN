@@ -177,7 +177,7 @@ def train(config=None):
             train_image_dirs, train_joint_csvs, train_xy_csvs = discover_dataset_folders(config.train_main_folder_path)
             dataset_train = eefdataset.EEFDataset(image_dirs=train_image_dirs, joint_csv_paths=train_joint_csvs,
                                             xy_csv_paths=train_xy_csvs, joint_precision=config.ground_truth_precision,
-                                            xy_bin_nbr=100, transform=transform_train)
+                                            transform=transform_train)
             
             transform_val = T.Compose([T.Lambda(lambda img: TF.rotate(img, 180)),
                                     T.Lambda(lambda img: TF.crop(img, top=config.top_cropping, left=config.left_cropping, height=img.height - config.bottom_cropping, width=img.width - config.right_cropping)),
@@ -186,7 +186,7 @@ def train(config=None):
             val_image_dirs, val_joint_csvs, val_xy_csvs = discover_dataset_folders(config.val_main_folder_path)
             dataset_val = eefdataset.EEFDataset(image_dirs=val_image_dirs, joint_csv_paths=val_joint_csvs,
                                             xy_csv_paths=val_xy_csvs, joint_precision=config.ground_truth_precision,
-                                            xy_bin_nbr=100, transform=transform_val)
+                                            transform=transform_val)
             
             dataset_train.save_to_csv(".tmp/train_dataset.csv")
             dataset_val.save_to_csv(".tmp/val_dataset.csv")
@@ -197,6 +197,8 @@ def train(config=None):
 
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             print(f"Using device: {device}")
+
+            autocast_ctx = torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16)
 
             # Load DINOv3
             backbone_model = torch.hub.load(DINOV3_REPO_DIR, config.backbone, source='local', weights=DINO_CHECKPOINT_DICT[config.backbone], force_reload=False)
@@ -212,8 +214,6 @@ def train(config=None):
             if config.freeze_patch_embed:
                 print("Freezing patch embedding.")
                 backbone_model.patch_embed.requires_grad = False
-
-            xy_bin_nbr = config.xy_bin_nbr
 
             # Load model
             ee_model = model_token_dinov3_reg.EndEffectorPosePredToken(backbone_model).to(device)
@@ -238,17 +238,17 @@ def train(config=None):
             criterion_pixel = nn.MSELoss()
 
             # Create a directory to log checkpoints and results
-            os.makedirs("training", exist_ok=True)
+            os.makedirs("/checkpoints/training", exist_ok=True)
 
             # Use the date and time to create a unique directory
             now = datetime.datetime.now()
             timestamp = now.strftime("%Y%m%d_%H%M%S")
-            checkpoint_dir = os.path.join("training", f"checkpoint_{timestamp}")
+            checkpoint_dir = os.path.join("/checkpoints/training", f"checkpoint_{wandb.run.id}")
             os.makedirs(checkpoint_dir, exist_ok=True)
             #target_batch_size = config.target_batch_size
             #batch_size = min(config.max_batch_size, target_batch_size)
-            target_batch_size = 1
-            batch_size = 1
+            target_batch_size = 64
+            batch_size = 64
             accumulation_steps = max(1, target_batch_size // batch_size)
 
             weight_loss_joints = config.weight_ratio_joints
@@ -302,15 +302,15 @@ def train(config=None):
                 for i, (images, joint_values, image_names) in enumerate(tqdm.tqdm(dataloader_train, desc=f"Epoch {epoch+1}/{config.epochs}")):
                     # Start a timer to measure the training step duration
                     step_start_time = time.time()
-                    theta_rad = torch.deg2rad(joint_values['base_joint'].to(device).to(torch.float32))
+                    theta_rad = torch.deg2rad(joint_values['base_joint'].to(device).to(torch.bfloat16))
                     base_joint_sin_gt = torch.sin(2.0 * theta_rad)
                     base_joint_cos_gt = torch.cos(2.0 * theta_rad)
-                    base_x_gt = joint_values['x'].to(device) / 100.0
-                    base_y_gt = joint_values['y'].to(device) / 100.0
+                    base_x_gt = joint_values['x'].to(device)
+                    base_y_gt = joint_values['y'].to(device)
                     base_joint_gt = torch.stack([base_joint_sin_gt, base_joint_cos_gt], dim=-1)
-                    base_x_gt = base_x_gt.to(torch.float32)
-                    base_y_gt = base_y_gt.to(torch.float32)
-                    base_joint_gt = base_joint_gt.to(torch.float32)
+                    base_x_gt = base_x_gt.to(torch.bfloat16)
+                    base_y_gt = base_y_gt.to(torch.bfloat16)
+                    base_joint_gt = base_joint_gt.to(torch.bfloat16)
 
                     if DEBUG > 2:
                         # Save all images in the batch to disk for debugging
@@ -323,7 +323,8 @@ def train(config=None):
 
                     images = images.to(device)
 
-                    base_joint_sincos, base_x, base_y = ee_model(images)
+                    with autocast_ctx:
+                        base_joint_sincos, base_x, base_y = ee_model(images)
                     base_joint_sincos = normalize_2d(base_joint_sincos)
 
                     # Compute loss
@@ -393,7 +394,7 @@ def train(config=None):
                         theta_pred_rad = 0.5 * phi
                         theta_pred_rad = torch.remainder(theta_pred_rad, torch.pi)
                         theta_pred_deg = torch.rad2deg(theta_pred_rad)
-                        theta_gt_deg = joint_values['base_joint'].to(device).to(torch.float32)
+                        theta_gt_deg = joint_values['base_joint'].to(device).to(torch.bfloat16)
 
                         base_x_preds = base_x
                         base_y_preds = base_y
@@ -410,19 +411,6 @@ def train(config=None):
                         y_error_interval += y_error.sum().item()
                         samples_interval += images.size(0)
 
-                        if DEBUG > 0:
-                            if (i % 5 == 0) and (images.size(0) > 0):
-                                debug_dir = os.path.join(checkpoint_dir, "debug_samples")
-                                os.makedirs(debug_dir, exist_ok=True)
-                                save_debug_image(
-                                    images[0],   # first image in batch
-                                    {k: v[0].item() if hasattr(v, 'numpy') or torch.is_tensor(v) else v
-                                    for k, v in joint_values.items()},
-                                    os.path.join(debug_dir, f"train_epoch{epoch+1}_batch{i+1}.png"),
-                                    pred_x=base_x_preds[0].item() / xy_bin_nbr * images.shape[3],   # convert normalized back to pixels
-                                    pred_y=base_y_preds[0].item() / xy_bin_nbr * images.shape[2],
-                                    pred_angle=theta_pred_deg[0].item()
-                                )
 
                 epoch_loss = running_loss / img_total
                 running_loss_joints /= img_total
@@ -430,7 +418,7 @@ def train(config=None):
                 mean_ae_base_joint_train = angular_error_base_joint_total / img_total
                 mean_x_error_bin_train = x_error_bin_total / img_total
                 mean_y_error_bin_train = y_error_bin_total / img_total
-                train_average_error = ((mean_ae_base_joint_train / config.num_classes) + (mean_x_error_bin_train / xy_bin_nbr) + (mean_y_error_bin_train / xy_bin_nbr)) / 3.0
+                train_average_error = ((mean_ae_base_joint_train) + (mean_x_error_bin_train) + (mean_y_error_bin_train)) / 3.0
 
                 scheduler.step()
 
@@ -448,19 +436,20 @@ def train(config=None):
                         for i, (images, joint_values, image_names) in enumerate(tqdm.tqdm(dataloader_val, desc=f"Validation Epoch {epoch+1}/{config.epochs}")):
                             total_img_count += images.size(0)
 
-                            theta_rad = torch.deg2rad(joint_values['base_joint'].to(device).to(torch.float32))
+                            theta_rad = torch.deg2rad(joint_values['base_joint'].to(device).to(torch.bfloat16))
                             base_joint_sin_gt = torch.sin(2.0 * theta_rad)
                             base_joint_cos_gt = torch.cos(2.0 * theta_rad)
-                            base_x_gt = joint_values['x'].to(device) / 100.0
-                            base_y_gt = joint_values['y'].to(device) / 100.0
+                            base_x_gt = joint_values['x'].to(device)
+                            base_y_gt = joint_values['y'].to(device)
                             base_joint_gt = torch.stack([base_joint_sin_gt, base_joint_cos_gt], dim=-1)
-                            base_x_gt = base_x_gt.to(torch.float32)
-                            base_y_gt = base_y_gt.to(torch.float32)
-                            base_joint_gt = base_joint_gt.to(torch.float32)
+                            base_x_gt = base_x_gt.to(torch.bfloat16)
+                            base_y_gt = base_y_gt.to(torch.bfloat16)
+                            base_joint_gt = base_joint_gt.to(torch.bfloat16)
 
                             images = images.to(device)
 
-                            base_joint_sincos, base_x, base_y = ee_model(images)
+                            with autocast_ctx:
+                                base_joint_sincos, base_x, base_y = ee_model(images)
 
                             base_x_preds = base_x
                             base_y_preds = base_y
@@ -471,7 +460,7 @@ def train(config=None):
                             theta_pred_rad = 0.5 * phi
                             theta_pred_rad = torch.remainder(theta_pred_rad, torch.pi)
                             theta_pred_deg = torch.rad2deg(theta_pred_rad)
-                            theta_gt_deg = joint_values['base_joint'].to(device).to(torch.float32)
+                            theta_gt_deg = joint_values['base_joint'].to(device).to(torch.bfloat16)
                             angular_error_base_joint = ang_error_deg_period180(theta_pred_deg, theta_gt_deg)
                             angular_error_base_joint_total += torch.abs(angular_error_base_joint).sum().item()
 
@@ -483,20 +472,6 @@ def train(config=None):
                             if VERBOSE > 0:
                                 print(f"Validation batch processed: {images.size(0)} images.")
                                 print(f"x_error_bin: {x_error_bin_total}, y_error_bin: {y_error_bin_total}")
-
-                            if DEBUG > 0:
-                                if (i % 5 == 0) and (images.size(0) > 0):
-                                    debug_dir = os.path.join(checkpoint_dir, "debug_samples")
-                                    os.makedirs(debug_dir, exist_ok=True)
-                                    save_debug_image(
-                                        images[0],   # first image in batch
-                                        {k: v[0].item() if hasattr(v, 'numpy') or torch.is_tensor(v) else v
-                                        for k, v in joint_values.items()},
-                                        os.path.join(debug_dir, f"val_epoch{epoch+1}_batch{i+1}.png"),
-                                        pred_x=base_x_preds[0].item() / xy_bin_nbr * images.shape[3],   # convert normalized back to pixels
-                                        pred_y=base_y_preds[0].item() / xy_bin_nbr * images.shape[2],
-                                        pred_angle=angular_error_base_joint[0].item()
-                                    )
 
                     print(f"Validation: {total_img_count} images processed.")
                     print(f"x_error_bin_total: {x_error_bin_total}, y_error_pixel_total: {y_error_bin_total}")
@@ -539,8 +514,10 @@ if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Train EndEffectorPosePrediction Model with Token-based Architecture")
     parser.add_argument("--sweep", type=str, help="Sweep ID to use for hyperparameter optimization", required=True)
+    parser.add_argument("--bf16", action="store_true", help="Enable BF16 mixed precision training")
     args = parser.parse_args()
     sweep_id = args.sweep
+    use_bf16 = args.bf16
     print(sweep_id)
 
     api_key = os.environ.get("WANDB_API_KEY")

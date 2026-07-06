@@ -25,5 +25,5 @@ module load httpproxy
 
 export WANDB_MODE=online
 
-apptainer exec --nv --bind /home/ulaval.ca/wilah/projects/def-phgig4/eepp:/datasets --bind /etc/pki:/etc/pki --bind "$temp_file:/run/wandb_api_key.txt" ./scripts/train_token_dinov3_EEPP.sif bash \
-    -c "python3 train_token_x_y_rot_dinov3_reg.py --sweep norlab-ulaval/EndEffectorPosePred/c44wc8sr"
+apptainer exec --nv --bind /home/ulaval.ca/wilah/projects/def-phgig4/eepp:/datasets --bind /home/ulaval.ca/wilah/projects/def-phgig4/eepp_checkpoints:/checkpoints --bind /etc/pki:/etc/pki --bind "$temp_file:/run/wandb_api_key.txt" ./scripts/train_token_dinov3_EEPP.sif bash \
+    -c "python3 train_token_x_y_rot_dinov3_reg.py --sweep norlab-ulaval/EndEffectorPosePred/ulhfyxsr --bf16"
