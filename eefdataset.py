@@ -182,5 +182,14 @@ class EEFDataset(Dataset):
         return image, joint_values, image_name
 
     def save_to_csv(self, save_path):
-        df = pd.DataFrame([{'image_path': img, **vals} for img, vals, _ in self.data])
+        rows = []
+        for item in self.data:
+            # support either (img_path, vals) or (img_path, vals, extra)
+            if isinstance(item, (list, tuple)) and len(item) == 3:
+                img, vals, _ = item
+            else:
+                img, vals = item
+            rows.append({'image_path': img, **vals})
+
+        df = pd.DataFrame(rows)
         df.to_csv(save_path, index=False)

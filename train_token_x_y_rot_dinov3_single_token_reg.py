@@ -21,9 +21,13 @@ import time
 from torch.utils.data import DataLoader, SubsetRandomSampler
 
 import eefdataset
-import model_token_dinov3
+import model_token_dinov3_single_token_reg
 
 matplotlib.use("Agg")
+
+os.environ["TORCH_HOME"] = os.path.expanduser("~/.cache2/torch")
+torch.hub.set_dir(os.environ["TORCH_HOME"])
+os.makedirs(os.environ["TORCH_HOME"], exist_ok=True)
 
 DEBUG = 0
 VERBOSE = 0
@@ -36,6 +40,16 @@ DINO_CHECKPOINT_DICT = {
     'dinov3_vitl16': 'dinov3/checkpoints/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth',
     'dinov3_vits16': 'dinov3/checkpoints/dinov3_vits16_pretrain_lvd1689m-08c60483.pth',
 }
+
+def normalize_2d(v, eps=1e-8):
+    return v / (v.norm(dim=1, keepdim=True) + eps)
+
+def ang_error_deg_period180(pred_deg, gt_deg):
+    # both in degrees, return minimal error under 180° periodicity
+    d = pred_deg - gt_deg                  # signed difference
+    d = torch.remainder(d + 90.0, 180.0)   # shift, wrap to [0,180)
+    d = d - 90.0                           # shift back to [-90,90)
+    return d
 
 def save_debug_image(image_tensor, joint_values, save_path,
                      pred_x=None, pred_y=None, pred_angle=None,
@@ -78,7 +92,7 @@ def save_debug_image(image_tensor, joint_values, save_path,
     fig.savefig(save_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
 
-def half_pixels_resize_and_pad(img, s=1/math.sqrt(2)):
+def half_pixels_resize_and_pad(img, s=np.sqrt(0.5)):
     if hasattr(img, "size"):  # PIL Image
         new_w = round(img.width * s)
         new_h = round(img.height * s)
@@ -143,6 +157,7 @@ def train(config=None):
         with wandb.init(config=config):
             config = wandb.config
             random.seed(config.random_seed)
+            log_interval = getattr(config, "log_interval", 50)
             # Log the time to build the datasets
             start_time = datetime.datetime.now()
             transform_train = T.Compose([T.Lambda(lambda img: TF.rotate(img, 180)),
@@ -162,7 +177,7 @@ def train(config=None):
             train_image_dirs, train_joint_csvs, train_xy_csvs = discover_dataset_folders(config.train_main_folder_path)
             dataset_train = eefdataset.EEFDataset(image_dirs=train_image_dirs, joint_csv_paths=train_joint_csvs,
                                             xy_csv_paths=train_xy_csvs, joint_precision=config.ground_truth_precision,
-                                            xy_bin_nbr=100, transform=transform_train)
+                                            transform=transform_train)
             
             transform_val = T.Compose([T.Lambda(lambda img: TF.rotate(img, 180)),
                                     T.Lambda(lambda img: TF.crop(img, top=config.top_cropping, left=config.left_cropping, height=img.height - config.bottom_cropping, width=img.width - config.right_cropping)),
@@ -171,7 +186,7 @@ def train(config=None):
             val_image_dirs, val_joint_csvs, val_xy_csvs = discover_dataset_folders(config.val_main_folder_path)
             dataset_val = eefdataset.EEFDataset(image_dirs=val_image_dirs, joint_csv_paths=val_joint_csvs,
                                             xy_csv_paths=val_xy_csvs, joint_precision=config.ground_truth_precision,
-                                            xy_bin_nbr=100, transform=transform_val)
+                                            transform=transform_val)
             
             dataset_train.save_to_csv(".tmp/train_dataset.csv")
             dataset_val.save_to_csv(".tmp/val_dataset.csv")
@@ -184,7 +199,7 @@ def train(config=None):
             print(f"Using device: {device}")
 
             # Load DINOv3
-            backbone_model = torch.hub.load(DINOV3_REPO_DIR, 'dinov3_vitb16', source='local', weights="dinov3/checkpoints/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth", force_reload=False)
+            backbone_model = torch.hub.load(DINOV3_REPO_DIR, config.backbone, source='local', weights=DINO_CHECKPOINT_DICT[config.backbone], force_reload=False)
             for param in backbone_model.parameters():
                 param.requires_grad = True
 
@@ -200,16 +215,27 @@ def train(config=None):
 
             xy_bin_nbr = config.xy_bin_nbr
 
-            # Load model
-            ee_model = model_token_dinov3.EndEffectorPosePredToken(backbone_model, num_classes_joint=config.num_classes, nbr_classes_xy=xy_bin_nbr).to(device)
-            optimizer = torch.optim.AdamW(ee_model.parameters(), lr=config.learning_rate)
-            
-            scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer,
-                                                            total_iters=config.epochs,
-                                                            power=config.lr_decay_power)
+            # Load model (SINGLE TOKEN variant)
+            ee_model = model_token_dinov3_single_token_reg.EndEffectorPosePredToken(backbone_model).to(device)
+            decay = []
+            no_decay = []
 
-            criterion_joints = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
-            criterion_pixel = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
+            for name, param in ee_model.named_parameters():
+                if param.ndim == 1 or name.endswith(".bias"):
+                    no_decay.append(param)
+                else:
+                    decay.append(param)
+
+            optimizer = torch.optim.AdamW(
+                [
+                    {"params": decay, "weight_decay": 1e-2},
+                    {"params": no_decay, "weight_decay": 0.0},
+                ],
+                lr=config.learning_rate,
+            )
+
+            criterion_joints = nn.MSELoss()
+            criterion_pixel = nn.MSELoss()
 
             # Create a directory to log checkpoints and results
             os.makedirs("training", exist_ok=True)
@@ -219,21 +245,40 @@ def train(config=None):
             timestamp = now.strftime("%Y%m%d_%H%M%S")
             checkpoint_dir = os.path.join("training", f"checkpoint_{timestamp}")
             os.makedirs(checkpoint_dir, exist_ok=True)
-            current_label_smoothing = config.label_smoothing
-            target_batch_size = config.target_batch_size
-            batch_size = min(config.max_batch_size, target_batch_size)
+            #target_batch_size = config.target_batch_size
+            #batch_size = min(config.max_batch_size, target_batch_size)
+            target_batch_size = 1
+            batch_size = 1
             accumulation_steps = max(1, target_batch_size // batch_size)
 
             weight_loss_joints = config.weight_ratio_joints
             weight_loss_xy = 1.0 - weight_loss_joints
 
             cpu_count = multiprocessing.cpu_count()
-            train_cpu_count = min(16, cpu_count)
-            val_cpu_count = min(16, cpu_count)
+            train_cpu_count = min(12, cpu_count)
+            val_cpu_count = min(12, cpu_count)
             dataloader_train = DataLoader(dataset_train, batch_size=batch_size, num_workers=train_cpu_count, shuffle=True, persistent_workers=True)
 
             if RUN_VALIDATION:
                 dataloader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, num_workers=val_cpu_count, persistent_workers=True)
+
+            num_training_steps = np.ceil(len(dataloader_train) / log_interval)
+            print(f"Number of training steps per epoch: {num_training_steps}")
+            num_warmup_steps = int(0.1 * num_training_steps)
+            print(f"Number of warmup steps: {num_warmup_steps}")
+
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[
+                    torch.optim.lr_scheduler.LinearLR(
+                        optimizer, start_factor=0.01, total_iters=num_warmup_steps
+                    ),
+                    torch.optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer, T_max=num_training_steps - num_warmup_steps
+                    )
+                ],
+                milestones=[num_warmup_steps]
+            )
 
             for epoch in range(config.epochs):
                 ee_model.train()
@@ -246,14 +291,26 @@ def train(config=None):
                 y_error_bin_total = 0
                 train_average_error = 0
 
+                running_loss_interval = 0.0
+                running_loss_joints_interval = 0.0
+                running_loss_pixel_interval = 0.0
+                angular_error_interval = 0.0
+                x_error_interval = 0.0
+                y_error_interval = 0.0
+                samples_interval = 0
+
                 for i, (images, joint_values, image_names) in enumerate(tqdm.tqdm(dataloader_train, desc=f"Epoch {epoch+1}/{config.epochs}")):
                     # Start a timer to measure the training step duration
                     step_start_time = time.time()
-                    # Reset the gradients
-                    optimizer.zero_grad()
-                    base_joint_quant = joint_values['base_joint_quant'].to(device)
-                    base_x = joint_values['x'].to(device)
-                    base_y = joint_values['y'].to(device)
+                    theta_rad = torch.deg2rad(joint_values['base_joint'].to(device).to(torch.float32))
+                    base_joint_sin_gt = torch.sin(2.0 * theta_rad)
+                    base_joint_cos_gt = torch.cos(2.0 * theta_rad)
+                    base_x_gt = joint_values['x'].to(device) / 100.0
+                    base_y_gt = joint_values['y'].to(device) / 100.0
+                    base_joint_gt = torch.stack([base_joint_sin_gt, base_joint_cos_gt], dim=-1)
+                    base_x_gt = base_x_gt.to(torch.float32)
+                    base_y_gt = base_y_gt.to(torch.float32)
+                    base_joint_gt = base_joint_gt.to(torch.float32)
 
                     if DEBUG > 2:
                         # Save all images in the batch to disk for debugging
@@ -266,11 +323,12 @@ def train(config=None):
 
                     images = images.to(device)
 
-                    base_joint_logits, base_x_logits, base_y_logits = ee_model(images)
+                    base_joint_sincos, base_x, base_y = ee_model(images)
+                    base_joint_sincos = normalize_2d(base_joint_sincos)
 
                     # Compute loss
-                    loss_joints = criterion_joints(base_joint_logits, base_joint_quant)
-                    loss_pixel = criterion_pixel(base_x_logits, base_x) + criterion_pixel(base_y_logits, base_y)
+                    loss_joints = criterion_joints(base_joint_sincos, base_joint_gt)
+                    loss_pixel = criterion_pixel(base_x, base_x_gt) + criterion_pixel(base_y, base_y_gt)
                     
                     loss = (loss_joints * weight_loss_joints) + (loss_pixel * weight_loss_xy)
                     running_loss += loss.item()
@@ -278,6 +336,42 @@ def train(config=None):
                     running_loss_pixel += loss_pixel.item()
                     
                     loss.backward()
+
+                    # accumulate interval stats
+                    running_loss_interval += loss.item()
+                    running_loss_joints_interval += loss_joints.item()
+                    running_loss_pixel_interval += loss_pixel.item()
+
+                    # log every N batches
+                    if (i + 1) % log_interval == 0:
+                        avg_loss_interval = running_loss_interval / log_interval
+                        avg_loss_joints_interval = running_loss_joints_interval / log_interval
+                        avg_loss_pixel_interval = running_loss_pixel_interval / log_interval
+                        mean_ae_interval = angular_error_interval / samples_interval
+                        mean_x_interval = x_error_interval / samples_interval
+                        mean_y_interval = y_error_interval / samples_interval
+
+                        wandb.log({
+                            "train_batch_loss": avg_loss_interval,
+                            "train_batch_loss_joints": avg_loss_joints_interval,
+                            "train_batch_loss_pixel": avg_loss_pixel_interval,
+                            "train_batch_angular_error": mean_ae_interval,
+                            "train_batch_x_error": mean_x_interval,
+                            "train_batch_y_error": mean_y_interval,
+                            "epoch": epoch + 1,
+                            "batch": i + 1,
+                            "learning_rate": optimizer.param_groups[0]["lr"],
+                        })
+
+                        print(
+                            f"Epoch {epoch+1} | Batch {i+1}/{len(dataloader_train)} "
+                            f"| Loss {avg_loss_interval:.4f}"
+                        )
+
+                        # reset interval counters
+                        running_loss_interval = 0.0
+                        running_loss_joints_interval = 0.0
+                        running_loss_pixel_interval = 0.0
 
                     # Debug gradient
                     if VERBOSE > 1:
@@ -295,31 +389,26 @@ def train(config=None):
 
                     if COMPUTE_ERROR_IN_TRAINING:
                         # Predictions
-                        base_joint_preds = base_joint_logits.argmax(dim=1)
-                        base_x_preds = base_x_logits.argmax(dim=1)
-                        base_y_preds = base_y_logits.argmax(dim=1)
+                        phi =torch.atan2(base_joint_sincos[:, 0], base_joint_sincos[:, 1])
+                        theta_pred_rad = 0.5 * phi
+                        theta_pred_rad = torch.remainder(theta_pred_rad, torch.pi)
+                        theta_pred_deg = torch.rad2deg(theta_pred_rad)
+                        theta_gt_deg = joint_values['base_joint'].to(device).to(torch.float32)
 
-                        # Convert to angles
-                        base_joint_pred_angles = eefdataset.class_to_angle(base_joint_preds, config.ground_truth_precision, symmetric=True)
-                        base_joint_gt_angles = eefdataset.class_to_angle(base_joint_quant, config.ground_truth_precision, symmetric=True)
-                        if VERBOSE > 0:
-                            print(f"base_joint_pred_angles: {base_joint_pred_angles}")
-                            print(f"target_base: {base_joint_quant}")
-                            print(f"base_joint_gt_angles: {base_joint_gt_angles}")
+                        base_x_preds = base_x
+                        base_y_preds = base_y
 
-                        # Compute angular error
-                        angular_error_base_joint = torch.abs(base_joint_pred_angles - base_joint_gt_angles)
+                        angular_error_base_joint = ang_error_deg_period180(theta_pred_deg, theta_gt_deg)
+                        angular_error_base_joint_total += torch.abs(angular_error_base_joint).sum().item()
 
-                        # Fix the angular error calculation because right now if we predict 0 and GT is 179, we get 179 which is not correct as the error should be 1
-                        angular_error_base_joint = torch.where(angular_error_base_joint > 90, 180 - angular_error_base_joint, angular_error_base_joint)
-
-                        # Accumulate for epoch
-                        angular_error_base_joint_total += angular_error_base_joint.sum().item()
-
-                        x_error_bin = torch.abs(base_x_preds - base_x)
-                        y_error_bin = torch.abs(base_y_preds - base_y)
-                        x_error_bin_total += x_error_bin.sum().item()
-                        y_error_bin_total += y_error_bin.sum().item()
+                        x_error = torch.abs(base_x_preds - base_x_gt)
+                        y_error = torch.abs(base_y_preds - base_y_gt)
+                        x_error_bin_total += x_error.sum().item()
+                        y_error_bin_total += y_error.sum().item()
+                        angular_error_interval += torch.abs(angular_error_base_joint).sum().item()
+                        x_error_interval += x_error.sum().item()
+                        y_error_interval += y_error.sum().item()
+                        samples_interval += images.size(0)
 
                         if DEBUG > 0:
                             if (i % 5 == 0) and (images.size(0) > 0):
@@ -332,7 +421,7 @@ def train(config=None):
                                     os.path.join(debug_dir, f"train_epoch{epoch+1}_batch{i+1}.png"),
                                     pred_x=base_x_preds[0].item() / xy_bin_nbr * images.shape[3],   # convert normalized back to pixels
                                     pred_y=base_y_preds[0].item() / xy_bin_nbr * images.shape[2],
-                                    pred_angle=base_joint_pred_angles[0].item()
+                                    pred_angle=theta_pred_deg[0].item()
                                 )
 
                 epoch_loss = running_loss / img_total
@@ -359,30 +448,35 @@ def train(config=None):
                         for i, (images, joint_values, image_names) in enumerate(tqdm.tqdm(dataloader_val, desc=f"Validation Epoch {epoch+1}/{config.epochs}")):
                             total_img_count += images.size(0)
 
-                            base_joint_quant = joint_values['base_joint_quant'].to(device)
-                            base_x = joint_values['x'].to(device)
-                            base_y = joint_values['y'].to(device)
+                            theta_rad = torch.deg2rad(joint_values['base_joint'].to(device).to(torch.float32))
+                            base_joint_sin_gt = torch.sin(2.0 * theta_rad)
+                            base_joint_cos_gt = torch.cos(2.0 * theta_rad)
+                            base_x_gt = joint_values['x'].to(device) / 100.0
+                            base_y_gt = joint_values['y'].to(device) / 100.0
+                            base_joint_gt = torch.stack([base_joint_sin_gt, base_joint_cos_gt], dim=-1)
+                            base_x_gt = base_x_gt.to(torch.float32)
+                            base_y_gt = base_y_gt.to(torch.float32)
+                            base_joint_gt = base_joint_gt.to(torch.float32)
 
                             images = images.to(device)
 
-                            if torch.any(base_x > xy_bin_nbr) or torch.any(base_y > xy_bin_nbr):
-                                print(f"Warning: Target pixel coordinates exceed xy_bin_nbr in validation.")
-                                print(f"target_x: {base_x}, target_y: {base_y}")
+                            base_joint_sincos, base_x, base_y = ee_model(images)
 
-                            base_joint_logits, base_x_logits, base_y_logits = ee_model(images)
-
-                            base_joint_preds = base_joint_logits.argmax(dim=1)
-                            base_x_preds = base_x_logits.argmax(dim=1)
-                            base_y_preds = base_y_logits.argmax(dim=1)
-                            base_joint_pred_angles = eefdataset.class_to_angle(base_joint_preds, config.ground_truth_precision, symmetric=True)
-                            base_joint_gt_angles = eefdataset.class_to_angle(base_joint_quant, config.ground_truth_precision, symmetric=True)
+                            base_x_preds = base_x
+                            base_y_preds = base_y
                             
-                            angular_error_base_joint = torch.abs(base_joint_pred_angles - base_joint_gt_angles)
-                            angular_error_base_joint = torch.where(angular_error_base_joint > 90, 180 - angular_error_base_joint, angular_error_base_joint)
-                            angular_error_base_joint_total += angular_error_base_joint.sum().item()
+                            base_joint_sincos = normalize_2d(base_joint_sincos)
+                            # Predictions
+                            phi = torch.atan2(base_joint_sincos[:, 0], base_joint_sincos[:, 1])
+                            theta_pred_rad = 0.5 * phi
+                            theta_pred_rad = torch.remainder(theta_pred_rad, torch.pi)
+                            theta_pred_deg = torch.rad2deg(theta_pred_rad)
+                            theta_gt_deg = joint_values['base_joint'].to(device).to(torch.float32)
+                            angular_error_base_joint = ang_error_deg_period180(theta_pred_deg, theta_gt_deg)
+                            angular_error_base_joint_total += torch.abs(angular_error_base_joint).sum().item()
 
-                            x_error_bin = torch.abs(base_x_preds - base_x)
-                            y_error_bin = torch.abs(base_y_preds - base_y)
+                            x_error_bin = torch.abs(base_x_preds - base_x_gt)
+                            y_error_bin = torch.abs(base_y_preds - base_y_gt)
 
                             x_error_bin_total += x_error_bin.sum().item()
                             y_error_bin_total += y_error_bin.sum().item()
@@ -401,7 +495,7 @@ def train(config=None):
                                         os.path.join(debug_dir, f"val_epoch{epoch+1}_batch{i+1}.png"),
                                         pred_x=base_x_preds[0].item() / xy_bin_nbr * images.shape[3],   # convert normalized back to pixels
                                         pred_y=base_y_preds[0].item() / xy_bin_nbr * images.shape[2],
-                                        pred_angle=base_joint_pred_angles[0].item()
+                                        pred_angle=angular_error_base_joint[0].item()
                                     )
 
                     print(f"Validation: {total_img_count} images processed.")
@@ -415,7 +509,6 @@ def train(config=None):
                 wandb.log({
                     "epoch": epoch + 1,
                     "learning_rate": current_lr,
-                    "label_smoothing": current_label_smoothing,
                     "train_angular_error_joint3": mean_ae_base_joint_train,
                     "train_x_error_pixel": mean_x_error_bin_train,
                     "train_y_error_pixel": mean_y_error_bin_train,
@@ -427,13 +520,6 @@ def train(config=None):
                     "val_y_error_pixel": mean_y_error_bin_val,
                     "train_average_error": train_average_error
                 })
-
-                # Reduce label smoothing
-                if current_label_smoothing > 0:
-                    current_label_smoothing = current_label_smoothing - (config.label_smoothing * config.reduce_label_smoothing)
-                    if current_label_smoothing < 0:
-                        current_label_smoothing = 0
-                    criterion_joints = nn.CrossEntropyLoss(label_smoothing=current_label_smoothing)
                 
                 # Save model checkpoint
                 checkpoint_path = os.path.join(checkpoint_dir, f"model_checkpoint.pt")
@@ -451,7 +537,7 @@ def train(config=None):
 
 if __name__ == "__main__":
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Train EndEffectorPosePrediction Model with Token-based Architecture")
+    parser = argparse.ArgumentParser(description="Train EndEffectorPosePrediction Model with Single Token-based Architecture (Single Token variant)")
     parser.add_argument("--sweep", type=str, help="Sweep ID to use for hyperparameter optimization", required=True)
     args = parser.parse_args()
     sweep_id = args.sweep

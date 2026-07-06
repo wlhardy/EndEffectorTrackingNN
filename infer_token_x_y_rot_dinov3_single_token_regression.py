@@ -12,10 +12,10 @@ import csv
 import heapq
 
 import eefdataset
-import model_token_dinov3_reg
+import model_token_dinov3_single_token_reg
 
 # Reuse the exact helper functions / conventions used in your regression training script
-from train_token_x_y_rot_dinov3_reg import (
+from train_token_x_y_rot_dinov3_single_token_reg import (
     save_debug_image,
     ang_error_deg_period180,
     discover_dataset_folders,
@@ -61,7 +61,7 @@ def run_inference(args):
     ckpt = torch.load(args.checkpoint, map_location=device)
     print(f"Loaded checkpoint from {args.checkpoint}")
 
-    # === Load model (REGRESSION) ===
+    # === Load model (REGRESSION - SINGLE TOKEN variant) ===
     backbone_model = torch.hub.load(
         DINOV3_REPO_DIR,
         args.dinov3_size,
@@ -69,7 +69,7 @@ def run_inference(args):
         weights=DINO_CHECKPOINT_DICT[args.dinov3_size],
         force_reload=False,
     )
-    ee_model = model_token_dinov3_reg.EndEffectorPosePredToken(backbone_model).to(device)
+    ee_model = model_token_dinov3_single_token_reg.EndEffectorPosePredToken(backbone_model).to(device)
     ee_model.load_state_dict(ckpt["model_state_dict"])
     ee_model.eval()
 
@@ -139,7 +139,7 @@ def run_inference(args):
     best_heap = []  # (-total_error, sample_index)
     heapq.heapify(best_heap)
 
-    print("Running inference (regression) ...")
+    print("Running inference (regression - single token variant) ...")
     for batch_i, (images, joint_values, image_names) in enumerate(tqdm(dataloader)):
         images = images.to(device)
 
@@ -269,11 +269,11 @@ def run_inference(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Inference (regression) for EndEffectorPosePredToken (DINOv3)")
+    parser = argparse.ArgumentParser(description="Inference (regression - single token variant) for EndEffectorPosePredToken (DINOv3)")
     parser.add_argument("--checkpoint", type=str, help="Path to model checkpoint (.pt)", default="/home/wilah/Downloads/model_checkpoint(3).pt")
     parser.add_argument("--dinov3_size", type=str, choices=["dinov3_vitb16", "dinov3_vitl16", "dinov3_vits16"], help="DINOv3 backbone size", default="dinov3_vitb16")
     parser.add_argument("--dataset", type=str, help="Path to dataset folder (same structure as training)", default="/home/wilah/datasets/heshan_october_grapple_data")
-    parser.add_argument("--output_dir", type=str, help="Output folder for results", default="results_inference_with_data_aug_reg/dinov3_base_reg_x_y_rot_half_res_fixed_x_y_super_cooked_cpu")
+    parser.add_argument("--output_dir", type=str, help="Output folder for results", default="results_inference_with_data_aug_reg/dinov3_base_single_token_reg_x_y_rot_half_res")
     parser.add_argument("--precision", type=float, default=1.0, help="Ground truth precision used in dataset")
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--top_n", type=int, default=30, help="Number of worst/best predictions to save")

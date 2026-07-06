@@ -274,7 +274,7 @@ def train(config=None):
                 y_error_bin_total = 0
                 train_average_error = 0
 
-                for i, (images, joint_values) in enumerate(tqdm.tqdm(dataloader_train, desc=f"Epoch {epoch+1}/{config.epochs}")):
+                for i, (images, joint_values, image_names) in enumerate(tqdm.tqdm(dataloader_train, desc=f"Epoch {epoch+1}/{config.epochs}")):
                     # Start a timer to measure the training step duration
                     step_start_time = time.time()
                     # Reset the gradients
@@ -375,7 +375,7 @@ def train(config=None):
                     ee_model.eval()
                     total_img_count = 0
                     with torch.no_grad():
-                        for i, (images, joint_values) in enumerate(tqdm.tqdm(dataloader_val, desc=f"Validation Epoch {epoch+1}/{config.epochs}")):
+                        for i, (images, joint_values, image_names) in enumerate(tqdm.tqdm(dataloader_val, desc=f"Validation Epoch {epoch+1}/{config.epochs}")):
                             total_img_count += images.size(0)
 
                             theta_rad = torch.deg2rad(joint_values['base_joint'].to(device).to(torch.float32))
